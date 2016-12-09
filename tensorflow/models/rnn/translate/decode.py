@@ -22,6 +22,7 @@ from tensorflow.models.rnn.translate.utils import data_utils, model_utils
 # Decoder settings
 tf.app.flags.DEFINE_string("test_src_idx", "/tmp/in.txt", "An integer-encoded input file")
 tf.app.flags.DEFINE_string("test_out_idx", "/tmp/out.txt", "Output file for decoder output")
+tf.app.flags.DEFINE_string("test_hidden_state", "/tmp/hidden.txt", "Output file for hidden state")
 tf.app.flags.DEFINE_integer("max_sentences", 0, "The maximum number of sentences to translate (all if set to 0)")
 tf.app.flags.DEFINE_boolean("interactive", False, "Decode from command line")
 tf.app.flags.DEFINE_string("model_path", None, "Path to trained model")
@@ -34,6 +35,10 @@ def decode(config, input=None, output=None, max_sentences=0):
   else:
     inp = config['test_src_idx']
     out = config['test_out_idx']
+  if 'test_hidden_state' in config:
+    hidden = config['test_hidden_state']
+  else:
+    hidden = '/tmp/hidden.txt'
 
   # Find longest input to create suitable bucket
   max_input_length = 0
@@ -64,16 +69,17 @@ def decode(config, input=None, output=None, max_sentences=0):
       max_sents = max_sentences
 
     logging.info("Start decoding, max_sentences=%i" % max_sents)
-    with open(inp) as f_in, open(out, 'w') as f_out:
+    with open(inp) as f_in, open(out, 'w') as f_out, open(hidden, 'w') as f_hidden:
       for sentence in f_in:
-        outputs = get_outputs(session, config, model, sentence, buckets)
+        outputs, states = get_outputs(session, config, model, sentence, buckets)
         logging.info("Output: {}".format(outputs))
 
         # If there is an EOS symbol in outputs, cut them at that point.
         if data_utils.EOS_ID in outputs:
           outputs = outputs[:outputs.index(data_utils.EOS_ID)]
         print(" ".join([str(tok) for tok in outputs]), file=f_out)
-
+        print(" ".join([str(tok) for tok in states]), file=f_hidden)
+        
         num_sentences += 1
         if max_sents > 0 and num_sentences >= max_sents:
           break
@@ -90,7 +96,7 @@ def decode_interactive(config):
     sys.stdout.flush()
     sentence = sys.stdin.readline()
     while sentence:
-      outputs = get_outputs(session, config, model, sentence)
+      outputs, states = get_outputs(session, config, model, sentence)
       print("Output: %s" % " ".join([str(tok) for tok in outputs]))
       print("> ", end="")
       sys.stdout.flush()
@@ -116,13 +122,17 @@ def get_outputs(session, config, model, sentence, buckets=None):
     {bucket_id: [(token_ids, [])]}, bucket_id, config['encoder'])
 
   # Get output logits for the sentence.
-  _, _, output_logits = model.step(session, encoder_inputs, decoder_inputs,
-                                 target_weights, bucket_id, forward_only=True,
-                                 sequence_length=sequence_length, src_mask=src_mask, bow_mask=bow_mask)
+  _, _, output_logits, hidden_states = model.get_state_step(
+    session, encoder_inputs, 
+    decoder_inputs,
+    target_weights, bucket_id, 
+    forward_only=True,
+    sequence_length=sequence_length,
+    src_mask=src_mask, bow_mask=bow_mask)
 
   # This is a greedy decoder - outputs are just argmaxes of output_logits.
   outputs = [int(np.argmax(logit, axis=1)) for logit in output_logits]
-  return outputs
+  return outputs, hidden_states
 
 def main(_):
   config = model_utils.process_args(FLAGS, train=False, greedy_decoder=True)

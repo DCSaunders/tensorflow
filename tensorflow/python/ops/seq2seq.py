@@ -212,7 +212,6 @@ def tied_rnn_seq2seq(encoder_inputs, decoder_inputs, cell,
     return rnn_decoder(decoder_inputs, enc_state, cell,
                        loop_function=loop_function, scope=scope)
 
-
 def embedding_rnn_decoder(decoder_inputs, initial_state, cell, num_symbols,
                           embedding_size, output_projection=None,
                           feed_previous=False,
@@ -351,6 +350,77 @@ def embedding_rnn_seq2seq(encoder_inputs, decoder_inputs, cell,
                                               lambda: decoder(True),
                                               lambda: decoder(False))
     return outputs_and_state[:-1], outputs_and_state[-1]
+
+
+def embedding_rnn_wrapper_seq2seq(encoder_inputs, decoder_inputs, cell,
+                               num_symbols, embedding_size,
+                               output_projection=None, feed_previous=False,
+                               dtype=dtypes.float32, scope=None, encoder=None,
+                               sequence_length=None, bucket_length=None, init_backward=False):
+  initializer=None
+  with variable_scope.variable_scope(scope or "embedding_rnn_seq2seq"):
+    # Encoder.
+    #encoder_cell = rnn_cell.EmbeddingWrapper(
+    #    cell, embedding_classes=num_encoder_symbols,
+    #    embedding_size=embedding_size)
+    #_, encoder_state = rnn.rnn(encoder_cell, encoder_inputs, dtype=dtype)
+    if encoder == "bidirectional":
+      encoder_cell_fw = rnn_cell.EmbeddingWrapper(
+        cell.get_fw_cell(), embedding_classes=num_symbols,
+        embedding_size=embedding_size, initializer=initializer)
+      encoder_cell_bw = rnn_cell.EmbeddingWrapper(
+        cell.get_bw_cell(), embedding_classes=num_symbols,
+        embedding_size=embedding_size, initializer=initializer)
+      _, encoder_state, encoder_state_bw = rnn.bidirectional_rnn(encoder_cell_fw, encoder_cell_bw,
+                                 encoder_inputs, dtype=dtype,
+                                 sequence_length=sequence_length,
+                                    bucket_length=bucket_length, scope=scope)
+      logging.info("Bidirectional state size=%d" % cell.state_size) # double the size for lstms
+      if init_backward:
+        cell = cell.get_bw_cell()
+        initial_state = encoder_state_bw
+      else:
+        cell = cell.get_fw_cell()
+        initial_state = encoder_state
+    elif encoder == "reverse":
+      encoder_cell = rnn_cell.EmbeddingWrapper(
+        cell, embedding_classes=num_symbols,
+        embedding_size=embedding_size, initializer=initializer)
+      _, encoder_state = rnn.rnn(
+        encoder_cell, encoder_inputs, dtype=dtype,
+        sequence_length=sequence_length, bucket_length=bucket_length,
+        reverse=True, scope=scope)
+      logging.info("Unidirectional state size=%d" % cell.state_size)
+      initial_state = encoder_state
+
+
+    # Decoder.
+    if output_projection is None:
+      cell = rnn_cell.OutputProjectionWrapper(cell, num_symbols)
+
+    if isinstance(feed_previous, bool):
+      return embedding_rnn_decoder(
+          decoder_inputs, initial_state, cell, num_symbols,
+          embedding_size, output_projection=output_projection,
+          feed_previous=feed_previous)
+
+    # If feed_previous is a Tensor, we construct 2 graphs and use cond.
+    def decoder(feed_previous_bool):
+      reuse = None if feed_previous_bool else True
+      with variable_scope.variable_scope(variable_scope.get_variable_scope(),
+                                         reuse=reuse):
+        outputs, state = embedding_rnn_decoder(
+            decoder_inputs, initial_state, cell, num_symbols,
+            embedding_size, output_projection=output_projection,
+            feed_previous=feed_previous_bool,
+            update_embedding_for_previous=False)
+        return outputs + [state]
+
+    outputs_and_state = control_flow_ops.cond(feed_previous,
+                                              lambda: decoder(True),
+                                              lambda: decoder(False))
+    return outputs_and_state[:-1], outputs_and_state[-1]
+
 
 
 def embedding_tied_rnn_seq2seq(encoder_inputs, decoder_inputs, cell,
@@ -534,6 +604,12 @@ def attention_decoder(decoder_inputs, initial_state, attention_states, cell,
            return True
       return False
 
+    def is_LSTM_cell_with_dropout(cell):
+      if isinstance(cell, rnn_cell.DropoutWrapper):
+        if is_LSTM_cell(cell._cell):
+           return True
+      return False
+
     def init_state():
       logging.info("Init decoder state for bow")
       for i in xrange(num_heads):
@@ -549,14 +625,16 @@ def attention_decoder(decoder_inputs, initial_state, attention_states, cell,
         from tensorflow.models.rnn.translate.seq2seq.wrapper_cells import BOWCell
         if isinstance(cell, BOWCell) and \
           (is_LSTM_cell(cell.get_cell()) or \
+           is_LSTM_cell_with_dropout(cell.get_cell()) or \
            (isinstance(cell.get_cell(), rnn_cell.MultiRNNCell) and \
-            (is_LSTM_cell(cell.get_cell()._cells[0]) \
-              or isinstance(cell.get_cell()._cells[0], rnn_cell.DropoutWrapper)))):
+            (is_LSTM_cell(cell.get_cell()._cells[0]) or \
+             is_LSTM_cell_with_dropout(cell.get_cell()._cells[0])))):
             # C = SUM_t a_t * C~_t or C = SUM_t a_t * i_t * C~_t (hidden is either C~_t or i_t * C~_t, see BOWCell.embed)
             C = math_ops.reduce_sum(
                 array_ops.reshape(a, [-1, attn_length, 1, 1]) * hidden, [1, 2])
             h = tanh(C)
-            if is_LSTM_cell(cell.get_cell()):
+            if is_LSTM_cell(cell.get_cell()) or \
+              is_LSTM_cell_with_dropout(cell.get_cell()):
               # single LSTM cell
               return array_ops.concat(1, [C, h])
             else:
@@ -775,7 +853,9 @@ def embedding_attention_seq2seq(encoder_inputs, decoder_inputs, cell,
                                 init_backward=False,
                                 bow_emb_size=None,
                                 init_const=False,
-                                bow_mask=None):
+                                bow_mask=None,
+                                keep_prob=1.0,
+                                initializer=None):
   """Embedding sequence-to-sequence model with attention.
 
   This model first embeds encoder_inputs by a newly created embedding (of shape
@@ -823,10 +903,10 @@ def embedding_attention_seq2seq(encoder_inputs, decoder_inputs, cell,
     if encoder == "bidirectional":
       encoder_cell_fw = rnn_cell.EmbeddingWrapper(
         cell.get_fw_cell(), embedding_classes=num_encoder_symbols,
-        embedding_size=embedding_size)
+        embedding_size=embedding_size, initializer=initializer)
       encoder_cell_bw = rnn_cell.EmbeddingWrapper(
         cell.get_bw_cell(), embedding_classes=num_encoder_symbols,
-        embedding_size=embedding_size)
+        embedding_size=embedding_size, initializer=initializer)
       encoder_outputs, encoder_state, encoder_state_bw = rnn.bidirectional_rnn(encoder_cell_fw, encoder_cell_bw,
                                  encoder_inputs, dtype=dtype,
                                  sequence_length=sequence_length,
@@ -836,13 +916,16 @@ def embedding_attention_seq2seq(encoder_inputs, decoder_inputs, cell,
     elif encoder == "reverse":
       encoder_cell = rnn_cell.EmbeddingWrapper(
         cell, embedding_classes=num_encoder_symbols,
-        embedding_size=embedding_size)
+        embedding_size=embedding_size, initializer=initializer)
       encoder_outputs, encoder_state = rnn.rnn(
         encoder_cell, encoder_inputs, dtype=dtype, sequence_length=sequence_length, bucket_length=bucket_length, reverse=True)
       logging.debug("Unidirectional state size=%d" % cell.state_size)
     elif encoder == "bow":
+      if keep_prob < 1:
+        logging.info("Applying dropout to input embeddings")
       encoder_outputs, encoder_state = cell.embed(rnn_cell.Embedder, num_encoder_symbols,
-                                                  bow_emb_size, encoder_inputs, dtype=dtype)
+                                                  bow_emb_size, encoder_inputs, dtype=dtype,
+                                                  keep_prob=keep_prob, initializer=initializer)
 
     # First calculate a concatenation of encoder outputs to put attention on.
     if encoder == "bow":
@@ -1069,6 +1152,44 @@ def sequence_loss(logits, targets, weights,
       return cost
 
 
+def model_with_buckets_states(encoder_inputs, decoder_inputs, targets, weights,
+                       buckets, seq2seq, softmax_loss_function=None,
+                       per_example_loss=False, name=None):
+  if len(encoder_inputs) < buckets[-1][0]:
+    raise ValueError("Length of encoder_inputs (%d) must be at least that of la"
+                     "st bucket (%d)." % (len(encoder_inputs), buckets[-1][0]))
+  if len(targets) < buckets[-1][1]:
+    raise ValueError("Length of targets (%d) must be at least that of last"
+                     "bucket (%d)." % (len(targets), buckets[-1][1]))
+  if len(weights) < buckets[-1][1]:
+    raise ValueError("Length of weights (%d) must be at least that of last"
+                     "bucket (%d)." % (len(weights), buckets[-1][1]))
+
+  all_inputs = encoder_inputs + decoder_inputs + targets + weights
+  losses = []
+  outputs = []
+  states = []
+  with ops.op_scope(all_inputs, name, "model_with_buckets"):
+    for j, bucket in enumerate(buckets):
+      with variable_scope.variable_scope(variable_scope.get_variable_scope(),
+                                         reuse=True if j > 0 else None):
+        bucket_outputs, bucket_states = seq2seq(encoder_inputs[:bucket[0]],
+                                    decoder_inputs[:bucket[1]],
+                                    bucket[0])
+        outputs.append(bucket_outputs)
+        states.append(bucket_states)
+        if per_example_loss:
+          losses.append(sequence_loss_by_example(
+              outputs[-1], targets[:bucket[1]], weights[:bucket[1]],
+              softmax_loss_function=softmax_loss_function))
+        else:
+          losses.append(sequence_loss(
+              outputs[-1], targets[:bucket[1]], weights[:bucket[1]],
+              softmax_loss_function=softmax_loss_function))
+  return outputs, losses, states
+
+
+
 def model_with_buckets(encoder_inputs, decoder_inputs, targets, weights,
                        buckets, seq2seq, softmax_loss_function=None,
                        per_example_loss=False, name=None):
@@ -1104,34 +1225,11 @@ def model_with_buckets(encoder_inputs, decoder_inputs, targets, weights,
     ValueError: If length of encoder_inputsut, targets, or weights is smaller
       than the largest (last) bucket.
   """
-  if len(encoder_inputs) < buckets[-1][0]:
-    raise ValueError("Length of encoder_inputs (%d) must be at least that of la"
-                     "st bucket (%d)." % (len(encoder_inputs), buckets[-1][0]))
-  if len(targets) < buckets[-1][1]:
-    raise ValueError("Length of targets (%d) must be at least that of last"
-                     "bucket (%d)." % (len(targets), buckets[-1][1]))
-  if len(weights) < buckets[-1][1]:
-    raise ValueError("Length of weights (%d) must be at least that of last"
-                     "bucket (%d)." % (len(weights), buckets[-1][1]))
-
-  all_inputs = encoder_inputs + decoder_inputs + targets + weights
-  losses = []
-  outputs = []
-  with ops.op_scope(all_inputs, name, "model_with_buckets"):
-    for j, bucket in enumerate(buckets):
-      with variable_scope.variable_scope(variable_scope.get_variable_scope(),
-                                         reuse=True if j > 0 else None):
-        bucket_outputs, _ = seq2seq(encoder_inputs[:bucket[0]],
-                                    decoder_inputs[:bucket[1]],
-                                    bucket[0])
-        outputs.append(bucket_outputs)
-        if per_example_loss:
-          losses.append(sequence_loss_by_example(
-              outputs[-1], targets[:bucket[1]], weights[:bucket[1]],
-              softmax_loss_function=softmax_loss_function))
-        else:
-          losses.append(sequence_loss(
-              outputs[-1], targets[:bucket[1]], weights[:bucket[1]],
-              softmax_loss_function=softmax_loss_function))
+  outputs, losses, _ = model_with_buckets_states(encoder_inputs, 
+                                                 decoder_inputs, 
+                                                 targets, weights, 
+                                                 buckets, seq2seq, 
+                                                 softmax_loss_function, 
+                                                 per_example_loss, name)
 
   return outputs, losses
