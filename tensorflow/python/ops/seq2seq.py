@@ -351,12 +351,12 @@ def embedding_rnn_seq2seq(encoder_inputs, decoder_inputs, cell,
                                               lambda: decoder(False))
     return outputs_and_state[:-1], outputs_and_state[-1]
 
-
-def embedding_rnn_wrapper_seq2seq(encoder_inputs, decoder_inputs, cell,
+def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
                                num_symbols, embedding_size,
                                output_projection=None, feed_previous=False,
                                dtype=dtypes.float32, scope=None, encoder=None,
-                               sequence_length=None, bucket_length=None, init_backward=False):
+                               sequence_length=None, bucket_length=None,
+                               init_backward=False, hidden_state=None):
   initializer=None
   with variable_scope.variable_scope(scope or "embedding_rnn_seq2seq"):
     # Encoder.
@@ -393,13 +393,19 @@ def embedding_rnn_wrapper_seq2seq(encoder_inputs, decoder_inputs, cell,
       logging.info("Unidirectional state size=%d" % cell.state_size)
       initial_state = encoder_state
 
-
     # Decoder.
     if output_projection is None:
       cell = rnn_cell.OutputProjectionWrapper(cell, num_symbols)
 
     if isinstance(feed_previous, bool):
-      return embedding_rnn_decoder(
+      if hidden_state is not None:
+        logging.info('Decoding from hidden state')
+        return embedding_rnn_decoder(
+          decoder_inputs, hidden_state, cell, num_symbols,
+          embedding_size, output_projection=output_projection,
+          feed_previous=feed_previous)
+      else:
+        return embedding_rnn_decoder(
           decoder_inputs, initial_state, cell, num_symbols,
           embedding_size, output_projection=output_projection,
           feed_previous=feed_previous)
@@ -409,7 +415,15 @@ def embedding_rnn_wrapper_seq2seq(encoder_inputs, decoder_inputs, cell,
       reuse = None if feed_previous_bool else True
       with variable_scope.variable_scope(variable_scope.get_variable_scope(),
                                          reuse=reuse):
-        outputs, state = embedding_rnn_decoder(
+        if hidden_state is not None:
+          logging.info('Decoding from hidden state')
+          outputs, state = embedding_rnn_decoder(
+            decoder_inputs, hidden_state, cell, num_symbols,
+            embedding_size, output_projection=output_projection,
+            feed_previous=feed_previous_bool,
+            update_embedding_for_previous=False)
+        else:
+          outputs, state = embedding_rnn_decoder(
             decoder_inputs, initial_state, cell, num_symbols,
             embedding_size, output_projection=output_projection,
             feed_previous=feed_previous_bool,
@@ -419,7 +433,7 @@ def embedding_rnn_wrapper_seq2seq(encoder_inputs, decoder_inputs, cell,
     outputs_and_state = control_flow_ops.cond(feed_previous,
                                               lambda: decoder(True),
                                               lambda: decoder(False))
-    return outputs_and_state[:-1], outputs_and_state[-1]
+    return outputs_and_state[:-1], initial_state
 
 
 
@@ -1154,7 +1168,7 @@ def sequence_loss(logits, targets, weights,
 
 def model_with_buckets_states(encoder_inputs, decoder_inputs, targets, weights,
                        buckets, seq2seq, softmax_loss_function=None,
-                       per_example_loss=False, name=None):
+                              per_example_loss=False, name=None, encoder_states=None):
   if len(encoder_inputs) < buckets[-1][0]:
     raise ValueError("Length of encoder_inputs (%d) must be at least that of la"
                      "st bucket (%d)." % (len(encoder_inputs), buckets[-1][0]))
@@ -1173,9 +1187,15 @@ def model_with_buckets_states(encoder_inputs, decoder_inputs, targets, weights,
     for j, bucket in enumerate(buckets):
       with variable_scope.variable_scope(variable_scope.get_variable_scope(),
                                          reuse=True if j > 0 else None):
-        bucket_outputs, bucket_states = seq2seq(encoder_inputs[:bucket[0]],
-                                    decoder_inputs[:bucket[1]],
-                                    bucket[0])
+        if encoder_states is not None:
+          bucket_outputs, bucket_states = seq2seq(encoder_inputs[:bucket[0]],
+                                                  decoder_inputs[:bucket[1]],
+                                                  bucket[0],
+                                                  encoder_states)
+        else:
+          bucket_outputs, bucket_states = seq2seq(encoder_inputs[:bucket[0]],
+                                                  decoder_inputs[:bucket[1]],
+                                                  bucket[0])
         outputs.append(bucket_outputs)
         states.append(bucket_states)
         if per_example_loss:

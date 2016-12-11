@@ -7,6 +7,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import cPickle
 import sys
 import numpy as np
 import datetime
@@ -24,6 +25,7 @@ tf.app.flags.DEFINE_string("test_src_idx", "/tmp/in.txt", "An integer-encoded in
 tf.app.flags.DEFINE_string("test_out_idx", "/tmp/out.txt", "Output file for decoder output")
 tf.app.flags.DEFINE_string("test_hidden_state", "/tmp/hidden.txt", "Output file for hidden state")
 tf.app.flags.DEFINE_integer("max_sentences", 0, "The maximum number of sentences to translate (all if set to 0)")
+tf.app.flags.DEFINE_string("decode_hidden", None, "Decode from hidden layers in file")
 tf.app.flags.DEFINE_boolean("interactive", False, "Decode from command line")
 tf.app.flags.DEFINE_string("model_path", None, "Path to trained model")
 FLAGS = tf.app.flags.FLAGS
@@ -39,51 +41,72 @@ def decode(config, input=None, output=None, max_sentences=0):
     hidden = config['test_hidden_state']
   else:
     hidden = '/tmp/hidden.txt'
-
-  # Find longest input to create suitable bucket
-  max_input_length = 0
-  with open(inp) as f_in:
-    for sentence in f_in:
-      token_ids = [ int(tok) for tok in sentence.strip().split() ]
-      if config['add_src_eos']:
-        token_ids.append(data_utils.EOS_ID)
-      if len(token_ids) > max_input_length:
-        max_input_length = len(token_ids)
-  bucket = model_utils.make_bucket(max_input_length, greedy_decoder=True)
-  buckets = list(model_utils._buckets)
-  buckets.append(bucket)
-  logging.info("Add new bucket={}".format(bucket))
-
-  with tf.Session() as session:
-    # Create model and load parameters: uses the training graph for decoding
-    model = model_utils.create_model(session, config, forward_only=True,
-                                        buckets=buckets)
-    model.batch_size = 1  # We decode one sentence at a time.
-
-    # Decode input file
-    num_sentences = 0
-    max_sents = 0
-    if 'max_sentences' in config:
-      max_sents = config and config['max_sentences']
-    if max_sentences > 0:
-      max_sents = max_sentences
-
-    logging.info("Start decoding, max_sentences=%i" % max_sents)
-    with open(inp) as f_in, open(out, 'w') as f_out, open(hidden, 'w') as f_hidden:
+  
+  if config['decode_hidden']:
+    decode_hidden(config, out)
+  else:
+    # Find longest input to create suitable bucket
+    max_input_length = 0
+    with open(inp) as f_in:
       for sentence in f_in:
-        outputs, states = get_outputs(session, config, model, sentence, buckets)
-        logging.info("Output: {}".format(outputs))
+        token_ids = [ int(tok) for tok in sentence.strip().split() ]
+        if config['add_src_eos']:
+          token_ids.append(data_utils.EOS_ID)
+        if len(token_ids) > max_input_length:
+          max_input_length = len(token_ids)
+    bucket = model_utils.make_bucket(max_input_length, greedy_decoder=True)
+    buckets = list(model_utils._buckets)
+    buckets.append(bucket)
+    logging.info("Add new bucket={}".format(bucket))
 
-        # If there is an EOS symbol in outputs, cut them at that point.
-        if data_utils.EOS_ID in outputs:
-          outputs = outputs[:outputs.index(data_utils.EOS_ID)]
-        print(" ".join([str(tok) for tok in outputs]), file=f_out)
-        print(" ".join([str(tok) for tok in states]), file=f_hidden)
-        
-        num_sentences += 1
-        if max_sents > 0 and num_sentences >= max_sents:
+    with tf.Session() as session:
+      # Create model and load parameters: uses the training graph for decoding
+      model = model_utils.create_model(session, config, forward_only=True,
+                                          buckets=buckets)
+      model.batch_size = 1  # We decode one sentence at a time.
+
+      # Decode input file
+      num_sentences = 0
+      max_sents = 0
+      if 'max_sentences' in config:
+        max_sents = config and config['max_sentences']
+      if max_sentences > 0:
+        max_sents = max_sentences
+
+      logging.info("Start decoding, max_sentences=%i" % max_sents)
+      with open(inp) as f_in, open(out, 'w') as f_out, open(hidden, 'wb') as f_hidden:
+        pickler = cPickle.Pickler(f_hidden)
+        for sentence in f_in:
+          outputs, states = get_outputs(session, config, model, sentence, buckets)
+          logging.info("Output: {}".format(outputs))
+
+          # If there is an EOS symbol in outputs, cut them at that point.
+          if data_utils.EOS_ID in outputs:
+            outputs = outputs[:outputs.index(data_utils.EOS_ID)]
+          print(" ".join([str(tok) for tok in outputs]), file=f_out)
+          pickler.dump(states)
+          num_sentences += 1
+          if max_sents > 0 and num_sentences >= max_sents:
+            break
+  logging.info("Decoding completed.")
+
+def decode_hidden(config, out):
+  with tf.Session() as session:
+    model = model_utils.create_model(session, config,
+                                     forward_only=True, hidden=True)
+    model.batch_size = 1  # We decode one sentence at a time.
+    with open(config['decode_hidden'], 'rb') as f_in:
+      unpickler = cPickle.Unpickler(f_in)
+      while True:
+        try:
+          hidden = np.array(unpickler.load())
+          hidden = hidden.reshape(1, max(hidden.shape))
+          logging.info("Hidden: {}".format(hidden))
+          outputs, states = get_outputs(session, config, model,
+                                    sentence='', hidden=hidden)
+          logging.info("Output: {}".format(outputs))
+        except (EOFError):
           break
-      logging.info("Decoding completed.")
 
 def decode_interactive(config):
   with tf.Session() as session:
@@ -102,7 +125,7 @@ def decode_interactive(config):
       sys.stdout.flush()
       sentence = sys.stdin.readline()
 
-def get_outputs(session, config, model, sentence, buckets=None):
+def get_outputs(session, config, model, sentence, buckets=None, hidden=None):
   # Get token-ids for the input sentence.
   token_ids = [ int(tok) for tok in sentence.strip().split() ]
   token_ids = [ w if w < config['src_vocab_size'] else data_utils.UNK_ID
@@ -128,7 +151,7 @@ def get_outputs(session, config, model, sentence, buckets=None):
     target_weights, bucket_id, 
     forward_only=True,
     sequence_length=sequence_length,
-    src_mask=src_mask, bow_mask=bow_mask)
+    src_mask=src_mask, bow_mask=bow_mask, hidden=hidden)
 
   # This is a greedy decoder - outputs are just argmaxes of output_logits.
   outputs = [int(np.argmax(logit, axis=1)) for logit in output_logits]
