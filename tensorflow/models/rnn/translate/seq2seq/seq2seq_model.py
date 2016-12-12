@@ -186,7 +186,7 @@ class Seq2SeqModel(object):
 
     # Feeds for inputs.
     self.encoder_inputs = []
-    self.encoder_states = tf.placeholder(tf.float32, shape=[None, None])
+    self.encoder_states = tf.placeholder(tf.float32, shape=[1, None])
     self.decoder_inputs = []
     self.target_weights = []
       

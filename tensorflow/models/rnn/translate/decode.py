@@ -40,7 +40,7 @@ def decode(config, input=None, output=None, max_sentences=0):
   if 'test_hidden_state' in config:
     hidden = config['test_hidden_state']
   else:
-    hidden = '/tmp/hidden.txt'
+    hidden = '/tmp/hidden'
   
   if config['decode_hidden']:
     decode_hidden(config, out)
@@ -79,6 +79,7 @@ def decode(config, input=None, output=None, max_sentences=0):
         for sentence in f_in:
           outputs, states = get_outputs(session, config, model, sentence, buckets)
           logging.info("Output: {}".format(outputs))
+          #logging.info("States: {}".format(states))
 
           # If there is an EOS symbol in outputs, cut them at that point.
           if data_utils.EOS_ID in outputs:
@@ -97,11 +98,15 @@ def decode_hidden(config, out):
     model.batch_size = 1  # We decode one sentence at a time.
     with open(config['decode_hidden'], 'rb') as f_in:
       unpickler = cPickle.Unpickler(f_in)
+      num_layers = config['num_layers']
+      hidden_size = config['hidden_size']
       while True:
         try:
+          #hidden = np.random.randn(1, 1000)
           hidden = np.array(unpickler.load())
-          hidden = hidden.reshape(1, max(hidden.shape))
-          logging.info("Hidden: {}".format(hidden))
+          hidden = hidden.reshape(model.batch_size, 2*hidden_size)
+          #logging.info("Hidden: {}".format(hidden))
+          #inp = ' '.join(list(str(num) for num in np.random.randint(3, high=100, size=7))) # random dummy input
           outputs, states = get_outputs(session, config, model,
                                     sentence='', hidden=hidden)
           logging.info("Output: {}".format(outputs))
@@ -111,8 +116,8 @@ def decode_hidden(config, out):
 def decode_interactive(config):
   with tf.Session() as session:
     # Create model and load parameters: uses the training graph for decoding
+    config['batch_size'] = 1 # We decode one sentence at a time.
     model = model_utils.create_model(session, config, forward_only=True)
-    model.batch_size = 1  # We decode one sentence at a time.
 
     # Decode from standard input.
     sys.stdout.write("> ")

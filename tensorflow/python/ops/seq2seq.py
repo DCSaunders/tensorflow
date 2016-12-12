@@ -400,15 +400,16 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
     if isinstance(feed_previous, bool):
       if hidden_state is not None:
         logging.info('Decoding from hidden state')
-        return embedding_rnn_decoder(
+        outputs, state = embedding_rnn_decoder(
           decoder_inputs, hidden_state, cell, num_symbols,
           embedding_size, output_projection=output_projection,
           feed_previous=feed_previous)
       else:
-        return embedding_rnn_decoder(
+        outputs, state = embedding_rnn_decoder(
           decoder_inputs, initial_state, cell, num_symbols,
           embedding_size, output_projection=output_projection,
           feed_previous=feed_previous)
+      return outputs, initial_state
 
     # If feed_previous is a Tensor, we construct 2 graphs and use cond.
     def decoder(feed_previous_bool):
@@ -428,7 +429,7 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
             embedding_size, output_projection=output_projection,
             feed_previous=feed_previous_bool,
             update_embedding_for_previous=False)
-        return outputs + [state]
+        return outputs + [initial_state]
 
     outputs_and_state = control_flow_ops.cond(feed_previous,
                                               lambda: decoder(True),
