@@ -79,8 +79,6 @@ def decode(config, input=None, output=None, max_sentences=0):
         for sentence in f_in:
           outputs, states = get_outputs(session, config, model, sentence, buckets)
           logging.info("Output: {}".format(outputs))
-          #logging.info("States: {}".format(states))
-
           # If there is an EOS symbol in outputs, cut them at that point.
           if data_utils.EOS_ID in outputs:
             outputs = outputs[:outputs.index(data_utils.EOS_ID)]
@@ -96,7 +94,7 @@ def decode_hidden(config, out):
     model = model_utils.create_model(session, config,
                                      forward_only=True, hidden=True)
     model.batch_size = 1  # We decode one sentence at a time.
-    with open(config['decode_hidden'], 'rb') as f_in:
+    with open(config['decode_hidden'], 'rb') as f_in, open(config['test_out_idx'], 'w') as f_out:
       unpickler = cPickle.Unpickler(f_in)
       num_layers = config['num_layers']
       hidden_size = config['hidden_size']
@@ -110,6 +108,9 @@ def decode_hidden(config, out):
           outputs, states = get_outputs(session, config, model,
                                     sentence='', hidden=hidden)
           logging.info("Output: {}".format(outputs))
+          if data_utils.EOS_ID in outputs:
+            outputs = outputs[:outputs.index(data_utils.EOS_ID)]
+          print(" ".join([str(tok) for tok in outputs]), file=f_out)
         except (EOFError):
           break
 
