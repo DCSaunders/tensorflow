@@ -48,9 +48,9 @@ def decode(config, input=None, output=None, max_sentences=0):
     max_sents = config and config['max_sentences']
   if max_sentences > 0:
     max_sents = max_sentences
-  if config['decode_hidden']:
+  if 'decode_hidden' in config and config['decode_hidden']:
     unpickle_hidden(config, out, max_sentences=max_sents)
-  elif config['decode_interpolate_hidden']:
+  elif 'decode_interpolate_hidden' in config and config['decode_interpolate_hidden']:
     decode_interpolate_hidden(config, out, max_sentences=max_sents)
   else:
     # Find longest input to create suitable bucket
@@ -62,10 +62,12 @@ def decode(config, input=None, output=None, max_sentences=0):
           token_ids.append(data_utils.EOS_ID)
         if len(token_ids) > max_input_length:
           max_input_length = len(token_ids)
-    bucket = model_utils.make_bucket(max_input_length, greedy_decoder=True)
     buckets = list(model_utils._buckets)
-    buckets.append(bucket)
-    logging.info("Add new bucket={}".format(bucket))
+    max_bucket = buckets[len(buckets) - 1][0]
+    if max_input_length > max_bucket:
+      bucket = model_utils.make_bucket(max_input_length, greedy_decoder=True)
+      buckets.append(bucket)
+      logging.info("Add new bucket={}".format(bucket))
 
     with tf.Session() as session:
       # Create model and load parameters: uses the training graph for decoding
@@ -188,7 +190,6 @@ def get_outputs(session, config, model, sentence, buckets=None, hidden=None):
   # Get a 1-element batch to feed the sentence to the model.
   encoder_inputs, decoder_inputs, target_weights, sequence_length, src_mask, bow_mask = model.get_batch(
     {bucket_id: [(token_ids, [])]}, bucket_id, config['encoder'])
-
   # Get output logits for the sentence.
   _, _, output_logits, hidden_states = model.get_state_step(
     session, encoder_inputs, 
