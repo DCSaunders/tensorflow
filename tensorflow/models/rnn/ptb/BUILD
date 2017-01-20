@@ -14,23 +14,7 @@ py_library(
     ],
     srcs_version = "PY2AND3",
     deps = [
-	":ptb_word_lm",
-	":rnnlm",
         ":reader",
-	"//tensorflow/models/rnn/ptb/utils:train_utils",
-        "//tensorflow/models/rnn/ptb/utils:model_utils",
-    ],
-)
-
-py_library(
-    name = "rnnlm",
-    srcs = ["rnnlm.py"],
-    srcs_version = "PY2AND3",
-    deps = [
-	"//tensorflow/models/rnn",
-        "//tensorflow/models/rnn:rnn_cell",
-        "//tensorflow/models/rnn:seq2seq",
-	"//tensorflow:tensorflow_py"
     ],
 )
 
@@ -60,9 +44,10 @@ py_binary(
     srcs_version = "PY2AND3",
     deps = [
         ":reader",
-	"//tensorflow/models/rnn/ptb/utils:model_utils",
-	"//tensorflow/models/rnn/ptb/utils:train_utils",
-        "//tensorflow:tensorflow_py"
+        "//tensorflow:tensorflow_py",
+        "//tensorflow/models/rnn",
+        "//tensorflow/models/rnn:rnn_cell",
+        "//tensorflow/models/rnn:seq2seq",
     ],
 )
 

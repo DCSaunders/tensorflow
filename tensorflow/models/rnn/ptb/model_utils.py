@@ -1,10 +1,5 @@
-import re, os
+import re
 import logging
-import tensorflow as tf
-
-from tensorflow.models.rnn.ptb.rnnlm import RNNLMModel
-
-class Config(object): pass
 
 class SmallConfig(object):
   """Small config."""
@@ -37,7 +32,7 @@ class MediumConfig(object):
   vocab_size = 10000
 
 class MediumConfig16k(object):
-  """Medium config with 16k vocab."""
+  """Medium config."""
   init_scale = 0.05
   learning_rate = 1.0
   max_grad_norm = 5
@@ -50,21 +45,6 @@ class MediumConfig16k(object):
   lr_decay = 0.8
   batch_size = 20
   vocab_size = 16162
-
-class MediumConfigChars(object):
-  """Config for character rnnlm."""
-  init_scale = 0.05
-  learning_rate = 1.0
-  max_grad_norm = 5
-  num_layers = 2
-  num_steps = 100
-  hidden_size = 1000
-  max_epoch = 1
-  max_max_epoch = 15
-  keep_prob = 0.5
-  lr_decay = 0.8
-  batch_size = 20
-  vocab_size = 90  
 
 class LargeConfig(object):
   """Large config."""
@@ -118,8 +98,6 @@ def get_config(model_config):
     return MediumConfig()
   elif model_config == "medium16k":
     return MediumConfig16k()
-  elif model_config == "medium_chars":
-    return MediumConfigChars()
   elif model_config == "large":
     return LargeConfig()
   elif model_config == "large50k":
@@ -130,54 +108,19 @@ def get_config(model_config):
     raise ValueError("Invalid model: %s", model_config)
 
 def read_config(config_file):
-  config = Config()
+  config = SmallConfig()
   logging.info("Settings from tensorflow config file:")  
   with open(config_file) as f:
     for line in f:
-      key,value = line.strip().split(": ")
+      if '=' in line:
+        key,value = line.strip().split("=")
+      else:
+        key, value = line.strip().split(":")
+      key,value = key.strip(), value.strip()
       if re.match("^\d+$", value):
         value = int(value)
       elif re.match("^[\d\.]+$", value):
         value = float(value)
-      setattr(config, key, value)
+      config.key = value
       logging.info("{}: {}".format(key, value))
   return config
-
-def create_model(session, config, eval_config, train_dir, optimizer):
-  initializer = tf.random_uniform_initializer(-config.init_scale, config.init_scale)
-  with tf.variable_scope("model", reuse=None, initializer=initializer):
-    model = RNNLMModel(is_training=True, config=config, optimizer=optimizer)
-  with tf.variable_scope("model", reuse=True, initializer=initializer):
-    mvalid = RNNLMModel(is_training=False, config=config)
-    mtest = RNNLMModel(is_training=False, config=eval_config)
-
-  ckpt = tf.train.get_checkpoint_state(train_dir)
-  if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path):
-    logging.info("Reading model parameters from %s" % ckpt.model_checkpoint_path)
-    model.saver.restore(session, ckpt.model_checkpoint_path)
-  else:
-    logging.info("Created model with fresh parameters.")
-    session.run(tf.initialize_all_variables())
-  return model, mvalid, mtest
-
-def load_model(session, model_config, train_dir, use_log_probs=False):
-  # Create and load model for decoding
-  # If model_config is a path, read config from that path, else treat as config name
-  if os.path.exists(model_config):
-    config = read_config(model_config)
-  else:
-    config = get_config(model_config)
-  config.batch_size = 1
-  config.num_steps = 1
-
-  with tf.variable_scope("model", reuse=None):
-    model = RNNLMModel(is_training=False, config=config, use_log_probs=use_log_probs)
-
-  ckpt = tf.train.get_checkpoint_state(train_dir)
-  if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path):
-    logging.info("Reading model parameters from %s" % ckpt.model_checkpoint_path)
-    model.saver.restore(session, ckpt.model_checkpoint_path)
-  else:
-    logging.error("Could not find model in directory %s." % train_dir)
-    exit(1)
-  return model, config
