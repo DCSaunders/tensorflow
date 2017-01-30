@@ -23,7 +23,7 @@ from tensorflow.models.rnn.translate.utils import data_utils, model_utils
 # Decoder settings
 tf.app.flags.DEFINE_string("test_src_idx", "/tmp/in.txt", "An integer-encoded input file")
 tf.app.flags.DEFINE_string("test_out_idx", "/tmp/out.txt", "Output file for decoder output")
-tf.app.flags.DEFINE_string("test_hidden_state", "/tmp/hidden.txt", "Output file for hidden state")
+tf.app.flags.DEFINE_string("output_hidden", "/tmp/hidden", "Output file for hidden state")
 tf.app.flags.DEFINE_integer("max_sentences", 0, "The maximum number of sentences to translate (all if set to 0)")
 tf.app.flags.DEFINE_string("decode_hidden", None, "Decode from hidden layers in file")
 tf.app.flags.DEFINE_boolean("interactive", False, "Decode from command line")
@@ -38,11 +38,11 @@ def decode(config, input=None, output=None, max_sentences=0):
   else:
     inp = config['test_src_idx']
     out = config['test_out_idx']
-  if 'test_hidden_state' in config:
-    hidden = config['test_hidden_state']
+  if 'output_hidden' in config:
+    hidden = config['output_hidden']
   else:
     hidden = '/tmp/hidden'
-  
+    
   max_sents = 0
   if 'max_sentences' in config:
     max_sents = config and config['max_sentences']
@@ -108,7 +108,7 @@ def unpickle_hidden(config, out, max_sentences=0):
   with tf.Session() as session:
     model = model_utils.create_model(session, config, forward_only=True, hidden=True)
     model.batch_size = 1  # We decode one sentence at a time.
-
+    
     decode_hidden(session, model, config, out, hidden_list)
 
 def decode_interpolate_hidden(config, out, max_sentences=0):

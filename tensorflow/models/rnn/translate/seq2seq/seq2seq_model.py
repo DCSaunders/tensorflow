@@ -147,11 +147,13 @@ class Seq2SeqModel(object):
     if variable_prefix is not None:
       if 'seq2seq' in variable_prefix:
         scope = variable_prefix+"/embedding_tied_rnn_seq2seq"
+      elif 'autoenc' in variable_prefix:
+        scope = variable_prefix+"/embedding_rnn_autoencoder_seq2seq"
       else:
         scope = variable_prefix+"/embedding_attention_seq2seq"
       logging.info("Using variable scope {}".format(scope)) 
     def seq2seq_f(encoder_inputs, decoder_inputs, do_decode, bucket_length, encoder_state=None):
-      if 'seq2seq' in variable_prefix:
+      if 'seq2seq' in variable_prefix or 'autoenc' in variable_prefix:
         logging.info("Creating embedding rnn")
         return tf.nn.seq2seq.embedding_rnn_autoencoder_seq2seq(
           encoder_inputs, decoder_inputs, cell,
