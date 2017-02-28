@@ -197,10 +197,24 @@ class TFSeq2SeqEncodingGraph(EncodingGraph):
         # The seq2seq function: we use embedding for the input and attention.
         scope = None
         if variable_prefix is not None:
-          scope = variable_prefix+"/embedding_attention_seq2seq"
+          if 'seq2seq' in variable_prefix:
+            scope = variable_prefix+"/embedding_tied_rnn_seq2seq"
+          elif 'autoenc' in variable_prefix:
+            scope = variable_prefix+"/embedding_rnn_autoencoder_seq2seq"
+          else:
+            scope = variable_prefix+"/embedding_attention_seq2seq"
           logging.info("Using variable scope {}".format(scope))    
         def seq2seq_f(encoder_inputs, bucket_length):
-          return self._tf_enc_embedding_attention_seq2seq(encoder_inputs, cell, source_vocab_size, embedding_size, 
+          if 'seq2seq' in variable_prefix or 'autoenc' in variable_prefix:
+            logging.info("Creating embedding rnn")
+            return self._tf_enc_embedding_seq2seq(encoder_inputs, cell, source_vocab_size, embedding_size, 
+                                                          encoder=encoder, 
+                                                          sequence_length=self.sequence_length,
+                                                          bucket_length=bucket_length,
+                                                          init_backward=init_backward,
+                                                          scope=scope)
+          else:
+            return self._tf_enc_embedding_attention_seq2seq(encoder_inputs, cell, source_vocab_size, embedding_size, 
                                                           encoder=encoder, 
                                                           sequence_length=self.sequence_length,
                                                           bucket_length=bucket_length,
@@ -261,6 +275,54 @@ class TFSeq2SeqEncodingGraph(EncodingGraph):
             ret["enc_v_%d" % a] = outputs[a + 2 + self.num_heads]
         return outputs[0], ret
 
+    def _tf_enc_embedding_seq2seq(self, encoder_inputs, cell, 
+                                  num_symbols, embedding_size, 
+                                  encoder="reverse",
+                                  dtype=dtypes.float32,
+                                  sequence_length=None,
+                                  bucket_length=None,
+                                  init_backward=False,
+                                  scope=None):
+      initializer=None
+      with variable_scope.variable_scope(scope or "embedding_rnn_seq2seq", reuse=True):
+        if encoder == "bidirectional":
+          encoder_cell_fw = rnn_cell.EmbeddingWrapper(
+            cell.get_fw_cell(), embedding_classes=num_symbols,
+            embedding_size=embedding_size, initializer=initializer)
+          encoder_cell_bw = rnn_cell.EmbeddingWrapper(
+            cell.get_bw_cell(), embedding_classes=num_symbols,
+            embedding_size=embedding_size, initializer=initializer)
+          _, encoder_state, encoder_state_bw = rnn.bidirectional_rnn(encoder_cell_fw, encoder_cell_bw,
+                                     encoder_inputs, dtype=dtype,
+                                     sequence_length=sequence_length,
+                                        bucket_length=bucket_length, scope=scope)
+          logging.info("Bidirectional state size=%d" % cell.state_size) # double the size for lstms
+          if init_backward:
+            cell = cell.get_bw_cell()
+            initial_state = encoder_state_bw
+          else:
+            cell = cell.get_fw_cell()
+            initial_state = encoder_state
+        elif encoder == "reverse":
+          encoder_cell = rnn_cell.EmbeddingWrapper(
+            cell, embedding_classes=num_symbols,
+            embedding_size=embedding_size, initializer=initializer)
+          _, encoder_state = rnn.rnn(
+            encoder_cell, encoder_inputs, dtype=dtype,
+            sequence_length=sequence_length, bucket_length=bucket_length,
+            reverse=True, scope=scope)
+          logging.info("Unidirectional state size=%d" % cell.state_size)
+          initial_state = encoder_state
+        return self._tf_enc_embedding_decoder(initial_state, cell)
+
+    def _tf_enc_embedding_decoder(self, last_enc_state, cell, scope=None):
+        with tf.variable_scope(scope or "embedding_rnn_decoder"):
+            with tf.device("/cpu:0"):
+                return self._tf_enc_decoder(last_enc_state, cell)
+                
+    def _tf_enc_decoder(self, last_enc_state, cell, scope=None):
+        with tf.variable_scope(scope or "rnn_decoder"):
+            return [last_enc_state] + [last_enc_state] + [last_enc_state] + [last_enc_state]
 
     def _tf_enc_embedding_attention_seq2seq(self, encoder_inputs, cell,
                                     num_encoder_symbols,
@@ -476,9 +538,24 @@ class TFSeq2SeqSingleStepDecodingGraph(SingleStepDecodingGraph):
         # The seq2seq function: we use embedding for the input and attention.
         scope = None
         if variable_prefix is not None:
-          scope = variable_prefix+"/embedding_attention_seq2seq"
-          logging.info("Using variable scope {}".format(scope))
+          if 'seq2seq' in variable_prefix:
+            scope = variable_prefix+"/embedding_tied_rnn_seq2seq"
+          elif 'autoenc' in variable_prefix:
+            scope = variable_prefix+"/embedding_rnn_autoencoder_seq2seq"
+          else:
+            scope = variable_prefix+"/embedding_attention_seq2seq"
+          logging.info("Using variable scope {}".format(scope))    
         def seq2seq_f(bucket_enc_out, decoder_input):
+          if 'seq2seq' in variable_prefix or 'autoenc' in variable_prefix:
+            logging.info("Creating embedding rnn")
+            return self._tf_dec_embedding_seq2seq(bucket_enc_out, decoder_input, self.dec_state,
+                                                  cell, target_vocab_size, embedding_size, 
+                                                  output_projection=output_projection, encoder=encoder, 
+                                                  src_mask=self.src_mask, maxout_layer=maxout_layer,
+                                                  init_backward=init_backward,
+                                                  start=self.start, scope=scope,
+                                                  init_const=init_const)
+          else:
             return self._tf_dec_embedding_attention_seq2seq(bucket_enc_out,
                 decoder_input, self.dec_state, cell, target_vocab_size, embedding_size, 
                 output_projection=output_projection, encoder=encoder, 
@@ -573,6 +650,78 @@ class TFSeq2SeqSingleStepDecodingGraph(SingleStepDecodingGraph):
           # pass bow mask on
           ret["bow_mask"] = dec_state["bow_mask"]          
         return outputs[0], ret
+
+    def _tf_dec_embedding_seq2seq(self, enc_out, decoder_input, last_state,
+                                  cell, num_symbols, embedding_size, 
+                                  output_projection=None, encoder="reverse", 
+                                  src_mask=None, maxout_layer=False,
+                                  init_backward=False,
+                                  start=None, scope=None,
+                                  init_const=False):
+      with tf.variable_scope(scope or "embedding_rnn_seq2seq", reuse=True):
+        if encoder == "bidirectional":
+          if init_backward:
+            cell = cell.get_bw_cell()
+          else:
+            cell = cell.get_fw_cell()
+        
+        if output_projection is None:
+          cell = rnn_cell.OutputProjectionWrapper(cell, num_symbols)
+        return self._tf_dec_embedding_decoder(
+            enc_out, decoder_input, last_state, cell,
+            num_symbols, embedding_size, output_projection)
+
+    def _tf_dec_embedding_decoder(self, enc_out, decoder_input, last_state, cell,
+                                  num_symbols, embedding_size, output_projection=None, scope=None):
+      if output_projection is not None:
+        proj_weights = ops.convert_to_tensor(output_projection[0],
+                                             dtype=dtypes.float32)
+        proj_weights.get_shape().assert_is_compatible_with([None, num_symbols])
+        proj_biases = ops.convert_to_tensor(
+            output_projection[1], dtype=dtypes.float32)
+        proj_biases.get_shape().assert_is_compatible_with([num_symbols])
+      with variable_scope.variable_scope(scope or "embedding_rnn_decoder"):
+        with ops.device("/cpu:0"):
+          embedding = variable_scope.get_variable("embedding",
+                                              [num_symbols, embedding_size])
+        emb_inp = embedding_ops.embedding_lookup(embedding, decoder_input)
+        return self._tf_dec_decoder(enc_out, emb_inp, last_state, cell)
+
+    def _tf_dec_decoder(self, enc_out, decoder_input, last_state, cell, scope=None):
+      with variable_scope.variable_scope(scope or "rnn_decoder"):
+        #Dummy variable setting for decode function
+        num_heads = 1
+        hidden_shape = enc_out[1].get_shape()
+        hidden_feature_shape = enc_out[2].get_shape()
+        v_shape = enc_out[num_heads+2].get_shape()
+        hidden = tf.placeholder(dtypes.float32,
+            shape=[d.value for d in hidden_shape], 
+            name="enc_hidden")            
+        hidden_features = [tf.placeholder(dtypes.float32,
+            shape=[d.value for d in hidden_feature_shape],
+            name="enc_hidden_features_%d" % a) for a in xrange(num_heads)]
+        v = [tf.placeholder(dtypes.float32,
+            shape=[d.value for d in v_shape],
+            name="enc_v_%d" % a) for a in xrange(num_heads)]
+        self.enc_hidden.append(hidden)
+        self.enc_hidden_features.append(hidden_features)
+        self.enc_v.append(v)
+        logging.debug("{}".format(hidden.get_shape()))
+        batch_size = 1
+        attn_length = hidden.get_shape()[1].value
+        attn_size = hidden.get_shape()[1].value
+        attns = [tf.placeholder(dtypes.float32,
+                shape=[1, attn_size],
+                name="dec_attns_%d" % i) for i in xrange(num_heads)]
+        for a in attns:  # Ensure the second shape of attention vectors is set.
+          a.set_shape([None, attn_size])
+        self.dec_attns.append(attns)
+
+        state = last_state
+        outputs = []
+        output, new_state = cell(decoder_input, state)
+        outputs.append(output)
+        return outputs + [new_state] + [new_state]
 
     def _tf_dec_embedding_attention_seq2seq(self, enc_out, decoder_input, last_state, cell,
                                 num_decoder_symbols, embedding_size,

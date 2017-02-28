@@ -359,11 +359,6 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
                                init_backward=False, hidden_state=None):
   initializer=None
   with variable_scope.variable_scope(scope or "embedding_rnn_seq2seq"):
-    # Encoder.
-    #encoder_cell = rnn_cell.EmbeddingWrapper(
-    #    cell, embedding_classes=num_encoder_symbols,
-    #    embedding_size=embedding_size)
-    #_, encoder_state = rnn.rnn(encoder_cell, encoder_inputs, dtype=dtype)
     if encoder == "bidirectional":
       encoder_cell_fw = rnn_cell.EmbeddingWrapper(
         cell.get_fw_cell(), embedding_classes=num_symbols,
