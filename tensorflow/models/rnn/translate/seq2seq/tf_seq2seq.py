@@ -48,7 +48,7 @@ class TFSeq2SeqEngine(Engine):
                  encoder="reverse", use_sequence_length=False, use_src_mask=False, 
                  maxout_layer=False, init_backward=False, no_pad_symbol=False,
                  variable_prefix=None, init_const=False, use_bow_mask=False,
-                 initializer=None):
+                 initializer=None, latent_size=None, seq2seq_mode=None):
         self.source_vocab_size = source_vocab_size
         self.target_vocab_size = target_vocab_size
         self.buckets = buckets
@@ -73,6 +73,8 @@ class TFSeq2SeqEngine(Engine):
         self.init_const = init_const
         self.use_bow_mask = use_bow_mask
         self.initializer = initializer
+        self.latent_size = latent_size
+        self.seq2seq_mode = seq2seq_mode
                         
     def update_buckets(self, buckets):
       self.buckets = buckets
@@ -88,7 +90,7 @@ class TFSeq2SeqEngine(Engine):
                 self.embedding_size, self.hidden_size, self.num_layers, self.max_gradient_norm, self.batch_size, self.learning_rate,
                 self.learning_rate_decay_factor, self.use_lstm, self.num_samples, self.forward_only, self.opt_algorithm, self.encoder,
                 self.use_sequence_length, self.use_src_mask, self.maxout_layer, self.init_backward, self.no_pad_symbol, self.variable_prefix,
-                self.init_const, self.use_bow_mask, self.initializer)
+                                      self.init_const, self.use_bow_mask, self.initializer, seq2seq_mode=self.seq2seq_mode)
     
     def create_encoding_graph(self):
       '''
@@ -98,14 +100,14 @@ class TFSeq2SeqEngine(Engine):
       logging.info("Create encoding graph")    
       self.encoding_graph = TFSeq2SeqEncodingGraph(self.source_vocab_size, self.buckets, self.embedding_size, self.hidden_size, 
                self.num_layers, self.batch_size, self.use_lstm, self.num_samples, self.encoder, self.use_sequence_length, self.init_backward,
-               self.variable_prefix, self.initializer)
+                                                   self.variable_prefix, self.initializer, seq2seq_mode=self.seq2seq_mode)
       return self.encoding_graph
     
     def create_single_step_decoding_graph(self, enc_out):
       logging.info("Create decoding graph")
       self.decoding_graph = TFSeq2SeqSingleStepDecodingGraph(enc_out, self.target_vocab_size, self.buckets, self.embedding_size, self.hidden_size,
                self.num_layers, self.batch_size, self.use_lstm, self.num_samples, self.encoder, self.use_src_mask, self.maxout_layer, self.init_backward,
-               self.variable_prefix, self.init_const, self.use_bow_mask, self.initializer)
+                                                             self.variable_prefix, self.init_const, self.use_bow_mask, self.initializer, seq2seq_mode=self.seq2seq_mode)
       return self.decoding_graph
 
 
@@ -120,19 +122,20 @@ class TFSeq2SeqTrainingGraph(TrainGraph):
                  learning_rate_decay_factor, use_lstm=False,
                  num_samples=512, forward_only=False, opt_algorithm="sgd", encoder="reverse",
                  use_sequence_length=False, use_src_mask=False, maxout_layer=False, init_backward=False, no_pad_symbol=False,
-                 variable_prefix=None, init_const=False, use_bow_mask=False, initializer=None):
+                 variable_prefix=None, init_const=False, use_bow_mask=False, initializer=None, seq2seq_mode=None):
         super(TFSeq2SeqTrainingGraph, self).__init__(buckets, batch_size)
         self.seq2seq_model = Seq2SeqModel(source_vocab_size, target_vocab_size, buckets, embedding_size, hidden_size,
                  num_layers, max_gradient_norm, batch_size, learning_rate,
                  learning_rate_decay_factor, use_lstm,
                  num_samples, forward_only, opt_algorithm, encoder,
                  use_sequence_length, use_src_mask, maxout_layer, init_backward, no_pad_symbol, variable_prefix,
-                 init_const=init_const, use_bow_mask=use_bow_mask, initializer=initializer)
+                                          init_const=init_const, use_bow_mask=use_bow_mask, initializer=initializer)
 
         self.learning_rate = self.seq2seq_model.learning_rate
         self.global_step = self.seq2seq_model.global_step
         self.learning_rate_decay_op = self.seq2seq_model.learning_rate_decay_op
         self.saver = self.seq2seq_model.saver
+        self.seq2seq_mode=seq2seq_mode
     
     def train_step(self, session, encoder_inputs, decoder_inputs, target_weights,
            bucket_id, forward_only):
@@ -160,10 +163,11 @@ class TFSeq2SeqEncodingGraph(EncodingGraph):
     def __init__(self, source_vocab_size, buckets, embedding_size, hidden_size,
                  num_layers, batch_size, use_lstm=False, num_samples=512, 
                  encoder="reverse", use_sequence_length=False, init_backward=False,
-                 variable_prefix=None, initializer=None):
+                 variable_prefix=None, initializer=None, seq2seq_mode=None):
         super(TFSeq2SeqEncodingGraph, self).__init__(buckets, batch_size)
         self.source_vocab_size = source_vocab_size
         self.num_heads = 1
+        self.seq2seq_mode = seq2seq_mode
     
         # Create the internal multi-layer cell for our RNN.
         if use_lstm:
@@ -205,7 +209,7 @@ class TFSeq2SeqEncodingGraph(EncodingGraph):
             scope = variable_prefix+"/embedding_attention_seq2seq"
           logging.info("Using variable scope {}".format(scope))    
         def seq2seq_f(encoder_inputs, bucket_length):
-          if 'seq2seq' in variable_prefix or 'autoenc' in variable_prefix:
+          if self.seq2seq_mode == 'autoencoder':
             logging.info("Creating embedding rnn")
             return self._tf_enc_embedding_seq2seq(encoder_inputs, cell, source_vocab_size, embedding_size, 
                                                           encoder=encoder, 
@@ -449,11 +453,13 @@ class TFSeq2SeqSingleStepDecodingGraph(SingleStepDecodingGraph):
     def __init__(self, enc_out, target_vocab_size, buckets, embedding_size, hidden_size,
                  num_layers, batch_size, use_lstm=False, num_samples=512, 
                  encoder="reverse", use_src_mask=False, maxout_layer=False, init_backward=False,
-                 variable_prefix=None, init_const=False, use_bow_mask=False, initializer=None):
+                 variable_prefix=None, init_const=False, use_bow_mask=False, initializer=None,
+                 seq2seq_mode=None):
         super(TFSeq2SeqSingleStepDecodingGraph, self).__init__(buckets, batch_size)
         self.target_vocab_size = target_vocab_size
         self.num_heads = 1
-    
+        self.seq2seq_mode = None
+
         # If we use sampled softmax, we need an output projection.
         output_projection = None
         softmax_loss_function = None
@@ -546,7 +552,7 @@ class TFSeq2SeqSingleStepDecodingGraph(SingleStepDecodingGraph):
             scope = variable_prefix+"/embedding_attention_seq2seq"
           logging.info("Using variable scope {}".format(scope))    
         def seq2seq_f(bucket_enc_out, decoder_input):
-          if 'seq2seq' in variable_prefix or 'autoenc' in variable_prefix:
+          if self.seq2seq_mode == 'autoencoder':
             logging.info("Creating embedding rnn")
             return self._tf_dec_embedding_seq2seq(bucket_enc_out, decoder_input, self.dec_state,
                                                   cell, target_vocab_size, embedding_size, 
