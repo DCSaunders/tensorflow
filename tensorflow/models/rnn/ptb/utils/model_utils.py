@@ -1,4 +1,4 @@
-import re, os
+import re
 import logging
 import tensorflow as tf
 
@@ -35,7 +35,7 @@ class MediumConfig(object):
   vocab_size = 10000
 
 class MediumConfig16k(object):
-  """Medium config with 16k vocab."""
+  """Medium config."""
   init_scale = 0.05
   learning_rate = 1.0
   max_grad_norm = 5
@@ -48,21 +48,6 @@ class MediumConfig16k(object):
   lr_decay = 0.8
   batch_size = 20
   vocab_size = 16162
-
-class MediumConfigChars(object):
-  """Config for character rnnlm."""
-  init_scale = 0.05
-  learning_rate = 1.0
-  max_grad_norm = 5
-  num_layers = 2
-  num_steps = 100
-  hidden_size = 1000
-  max_epoch = 1
-  max_max_epoch = 15
-  keep_prob = 0.5
-  lr_decay = 0.8
-  batch_size = 20
-  vocab_size = 90  
 
 class LargeConfig(object):
   """Large config."""
@@ -116,8 +101,6 @@ def get_config(model_config):
     return MediumConfig()
   elif model_config == "medium16k":
     return MediumConfig16k()
-  elif model_config == "medium_chars":
-    return MediumConfigChars()
   elif model_config == "large":
     return LargeConfig()
   elif model_config == "large50k":
@@ -133,12 +116,16 @@ def read_config(config_file):
   logging.info("Settings from tensorflow config file:")  
   with open(config_file) as f:
     for line in f:
-      key,value = line.strip().split(": ")
+      if '=' in line:
+        key,value = line.strip().split("=")
+      else:
+        key, value = line.strip().split(":")
+      key,value = key.strip(), value.strip()
       if re.match("^\d+$", value):
         value = int(value)
       elif re.match("^[\d\.]+$", value):
         value = float(value)
-      setattr(config, key, value)
+      config.key = value
       logging.info("{}: {}".format(key, value))
   return config
 

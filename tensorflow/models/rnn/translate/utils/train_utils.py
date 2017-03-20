@@ -258,7 +258,7 @@ def eval_set(out, ref):
   import subprocess
   cat = subprocess.Popen(("cat", out), stdout=subprocess.PIPE)
   try:
-    multibleu = subprocess.check_output(("../scripts/multi-bleu.perl", "-lc",
+    multibleu = subprocess.check_output(("/home/mifs/ds636/code/scripts/multi-bleu.perl", "-lc",
                                        ref), stdin=cat.stdout)
     logging.info("{}".format(multibleu))
     import re

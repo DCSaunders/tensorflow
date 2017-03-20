@@ -83,6 +83,12 @@ tf.app.flags.DEFINE_boolean("legacy", False, "Read legacy models with slightly d
 tf.app.flags.DEFINE_boolean("bow_init_const", False, "Learn an initialisation matrix for the decoder instead of taking the average of source embeddings")
 tf.app.flags.DEFINE_boolean("use_bow_mask", False, "Normalize decoder output layer over per-sentence BOW vocabulary")
 
+# Extra model configuration for VAE model
+tf.app.flags.DEFINE_integer("latent_size", 20, "Size of VAE latent state.")
+tf.app.flags.DEFINE_boolean("annealing", True, "Use KL cost annealing for VAE training")
+tf.app.flags.DEFINE_integer("kl_annealing_steps", 1000, "Steps over which to linearly anneal the KL loss from 0 to 1")
+tf.app.flags.DEFINE_float("word_keep_prob", 0.7, "Probability of not replacing decoder input word with UNK during training")
+
 # Optimization settings
 tf.app.flags.DEFINE_string("opt_algorithm", "sgd", "Optimization algorithm: sgd, adagrad, adadelta")
 tf.app.flags.DEFINE_float("learning_rate", 1.0, "Learning rate.")
@@ -90,6 +96,10 @@ tf.app.flags.DEFINE_float("learning_rate_decay_factor", 0.99, "Learning rate dec
 tf.app.flags.DEFINE_boolean("adjust_lr", False, "Adjust learning rate independent of performance.")
 tf.app.flags.DEFINE_float("max_gradient_norm", 1.0, "Clip gradients to this norm.")
 tf.app.flags.DEFINE_integer("batch_size", 80, "Batch size to use during training.")
+
+# Mode
+tf.app.flags.DEFINE_string("seq2seq_mode", "nmt", "Mode to run seq2seq model: nmt, autoencoder, vae. nmt: Bahdanau system with attention. autoencoder: simple seq2seq encoder-decoder model. vae: recurrent variational autoencoder")
+
 
 # Rename model variables
 tf.app.flags.DEFINE_bool("rename_variable_prefix", False, "Rename model variables with variable_prefix (assuming the model was saved with default prefix)")
@@ -121,6 +131,7 @@ def train(config):
     # Create model
     if config['fixed_random_seed']:
       tf.set_random_seed(1234)
+      np.random.seed(1234)
     model = model_utils.create_model(session, config, forward_only=False)
 
     if config['save_npz']:
@@ -234,7 +245,6 @@ def train(config):
 
         # Zero timer and loss.
         step_time, loss = 0.0, 0.0
-
         # Run evals on development set and print their perplexity.
         if current_step % (config['steps_per_checkpoint'] * config['eval_frequency']) == 0:
           if config['eval_bleu']:

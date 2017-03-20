@@ -30,7 +30,6 @@ class BidirectionalRNNCell(RNNCell):
 
   @property
   def state_size(self):
-    self._cells[0]._state_is_tuple
     if self._cells[0]._state_is_tuple:
       return sum([cell.state_size[0]+cell.state_size[1] for cell in self._cells])
     else:

@@ -112,14 +112,14 @@ def get_initializer(config):
     return initializer
   return None
 
-def create_model(session, config, forward_only, rename_variable_prefix=None, buckets=None):
+def create_model(session, config, forward_only, rename_variable_prefix=None, buckets=None, hidden=False):
   """Create or load translation model for training or greedy decoding"""
   if not forward_only:
     logging.info("Creating %d layers of %d units, encoder=%s." % (config['num_layers'], config['hidden_size'], config['encoder']))
   if not buckets:
     buckets = _buckets
-  model = get_Seq2SeqModel(config, buckets, forward_only, rename_variable_prefix)
-
+  model = get_Seq2SeqModel(config, buckets, forward_only,
+                           rename_variable_prefix, hidden=hidden)
   model_path = get_model_path(config)
   if model_path and tf.gfile.Exists(model_path):
     logging.info("Reading model parameters from %s" % model_path)
@@ -146,7 +146,7 @@ def load_model(session, config):
 
   return model, training_graph, encoding_graph, single_step_decoding_graph, buckets
 
-def get_Seq2SeqModel(config, buckets, forward_only, rename_variable_prefix=None):
+def get_Seq2SeqModel(config, buckets, forward_only, rename_variable_prefix=None, hidden=False):
   return seq2seq_model.Seq2SeqModel(
       config['src_vocab_size'], config['trg_vocab_size'], buckets,
       config['embedding_size'], config['hidden_size'],
@@ -162,7 +162,13 @@ def get_Seq2SeqModel(config, buckets, forward_only, rename_variable_prefix=None)
       keep_prob=config['keep_prob'],
       initializer=get_initializer(config),
       rename_variable_prefix=rename_variable_prefix,
-      legacy=config['legacy'])
+      legacy=config['legacy'],
+      hidden=hidden,
+      latent_size=config['latent_size'],
+      annealing=config['annealing'],
+      anneal_steps=config['kl_annealing_steps'],
+      word_keep_prob=config['word_keep_prob'],
+      seq2seq_mode=config['seq2seq_mode'])
 
 def get_singlestep_Seq2SeqModel(config, buckets):
   return tf_seq2seq.TFSeq2SeqEngine(
@@ -178,8 +184,9 @@ def get_singlestep_Seq2SeqModel(config, buckets):
       variable_prefix=config['variable_prefix'],
       init_const=config['bow_init_const'], use_bow_mask=config['use_bow_mask'],
       initializer=get_initializer(config),
-      legacy=config['legacy'])
-
+      legacy=config['legacy'],
+    seq2seq_mode=config['seq2seq_mode'])
+  
 def rename_variable_prefix(config):
   logging.info("Rename model variables with prefix %s" % config['variable_prefix'])
   with tf.Session() as session:

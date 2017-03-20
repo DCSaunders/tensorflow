@@ -448,6 +448,10 @@ class LSTMCell(RNNCell):
     return self._state_size
 
   @property
+  def state_is_tuple(self):
+    return self._state_is_tuple
+
+  @property
   def output_size(self):
     return self._output_size
 
@@ -667,6 +671,8 @@ class DropoutWrapper(RNNCell):
     self._input_keep_prob = input_keep_prob
     self._output_keep_prob = output_keep_prob
     self._seed = seed
+    self._state_is_tuple = self._cell.state_is_tuple
+
 
   @property
   def state_size(self):
