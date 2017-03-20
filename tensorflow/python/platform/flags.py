@@ -37,6 +37,10 @@ class _FlagValues(object):
 
   def _parse_flags(self, args=None):
     result, unparsed = _global_parser.parse_known_args(args=args)
+    if unparsed:
+      import logging
+      logging.error("Unknown arguments: {}".format(unparsed))
+      exit(1)
     for flag_name, val in vars(result).items():
       self.__dict__['__flags'][flag_name] = val
     self.__dict__['__parsed'] = True
