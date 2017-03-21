@@ -77,9 +77,12 @@ class Seq2SeqModel(object):
                legacy=False,
                hidden=False,
                latent_size=None,
-               annealing=True,
+               annealing=False,
                anneal_steps=1000,
                word_keep_prob=1.0,
+               scheduled_sample=True,
+               scheduled_sample_steps=1000,
+               kl_min=0.0,
                seq2seq_mode="nmt"):
     """Create the model.
 
@@ -117,6 +120,9 @@ class Seq2SeqModel(object):
     self.seq2seq_mode = seq2seq_mode
     self.annealing = annealing
     self.anneal_steps = anneal_steps
+    self.scheduled_sample = scheduled_sample
+    self.scheduled_sample_steps = 1000
+    self.kl_min = kl_min
     self.word_keep_prob = word_keep_prob
 
     # If we use sampled softmax, we need an output projection.
@@ -238,6 +244,7 @@ class Seq2SeqModel(object):
     self.encoder_inputs = []
     self.encoder_states = tf.placeholder(tf.float32, shape=[1, None])
     self.decoder_inputs = []
+    self.decoder_src = []
     self.target_weights = []
     self.targets = []
       
@@ -247,6 +254,8 @@ class Seq2SeqModel(object):
     for i in xrange(buckets[-1][1] + 1):
       self.decoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
                                                 name="decoder{0}".format(i)))
+      self.decoder_src.append(tf.placeholder(tf.int32, shape=[None],
+                                             name="decoder_src{0}".format(i)))
       self.target_weights.append(tf.placeholder(dtype, shape=[None],
                                                 name="weight{0}".format(i)))
       self.targets.append(tf.placeholder(tf.int32, shape=[None],
@@ -280,6 +289,8 @@ class Seq2SeqModel(object):
       for b in range(len(self.losses)):
         self.reconstruct_loss[b] = self.losses[b][0]
         self.kl_loss[b] = self.losses[b][1]
+        if self.kl_min > 0.0:
+          self.kl_loss[b] = max(self.kl_min, self.kl_loss[b])
         self.losses[b] = tf.add(self.reconstruct_loss[b], tf.mul(self.anneal_scale, self.kl_loss[b]))
 
     model_args = {'encoder_inputs': self.encoder_inputs, 'decoder_inputs': self.decoder_inputs, 
@@ -383,12 +394,25 @@ class Seq2SeqModel(object):
       else:
         return words
       
+    def schedule(words):
+      # Boolean markers for linear scheduled sampling
+      feed_prev = []
+      p_feed_prev = min(1.0, self.global_step.eval()/self.scheduled_sample_steps)
+      for word in words:
+        if word == data_utils.GO_ID or np.random.uniform() < p_feed_prev:
+          feed_prev.append(False)
+        else:
+          feed_prev.append(True)
+      return feed_prev
+      
     # Input feed: encoder inputs, decoder inputs, target_weights, as provided.
     input_feed = {}
     for l in xrange(encoder_size):
       input_feed[self.encoder_inputs[l].name] = encoder_inputs[l]
     for l in xrange(decoder_size):
       input_feed[self.decoder_inputs[l].name] = word_dropout(decoder_inputs[l])
+      if self.scheduled_sample:
+        input_feed[self.decoder_src[l].name] = schedule(decoder_inputs[l])
       input_feed[self.target_weights[l].name] = target_weights[l]
       if l < decoder_size - 1:
         input_feed[self.targets[l].name] = decoder_inputs[l + 1]

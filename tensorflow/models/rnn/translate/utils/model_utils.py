@@ -168,6 +168,9 @@ def get_Seq2SeqModel(config, buckets, forward_only, rename_variable_prefix=None,
       annealing=config['annealing'],
       anneal_steps=config['kl_annealing_steps'],
       word_keep_prob=config['word_keep_prob'],
+      scheduled_sample=config['scheduled_sample'],
+      scheduled_sample_steps=config['scheduled_sample_steps'],
+      kl_min=config['kl_min'],
       seq2seq_mode=config['seq2seq_mode'])
 
 def get_singlestep_Seq2SeqModel(config, buckets):
