@@ -301,6 +301,10 @@ class BasicLSTMCell(RNNCell):
   def output_size(self):
     return self._num_units
 
+  @property
+  def state_is_tuple(self):
+    return self._state_is_tuple
+
   def __call__(self, inputs, state, scope=None):
     """Long short-term memory cell (LSTM)."""
     with vs.variable_scope(scope or type(self).__name__):  # "BasicLSTMCell"
@@ -580,7 +584,7 @@ class OutputProjectionWrapper(RNNCell):
   @property
   def state_size(self):
     return self._cell.state_size
-
+    
   @property
   def output_size(self):
     return self._output_size
@@ -671,7 +675,6 @@ class DropoutWrapper(RNNCell):
     self._input_keep_prob = input_keep_prob
     self._output_keep_prob = output_keep_prob
     self._seed = seed
-    self._state_is_tuple = self._cell.state_is_tuple
 
 
   @property

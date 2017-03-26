@@ -124,6 +124,7 @@ class Seq2SeqModel(object):
     self.scheduled_sample_steps = 1000
     self.kl_min = kl_min
     self.word_keep_prob = word_keep_prob
+    self.anneal_scale = tf.placeholder(tf.float32, shape=[])
 
     # If we use sampled softmax, we need an output projection.
     output_projection = None
@@ -201,7 +202,8 @@ class Seq2SeqModel(object):
         scope = variable_prefix+"/embedding_attention_seq2seq"
       logging.info("Using variable scope {}".format(scope)) 
 
-    def seq2seq_f(encoder_inputs, decoder_inputs, do_decode, bucket_length, encoder_state=None):
+    def seq2seq_f(encoder_inputs, decoder_inputs, do_decode, bucket_length, encoder_state=None,
+                  feed_prev_p=None):
       seq2seq_args = dict(encoder_inputs=encoder_inputs,
                           decoder_inputs=decoder_inputs,
                           cell=cell, 
@@ -218,15 +220,18 @@ class Seq2SeqModel(object):
       if self.seq2seq_mode == 'autoencoder':
         logging.info("Creating embedding rnn autoencoder")
         seq2seq_args.update(num_symbols=source_vocab_size,
-                            hidden_state=encoder_state)
+                            hidden_state=encoder_state,
+                            feed_prev_p=feed_prev_p)
         return tf.nn.seq2seq.embedding_rnn_autoencoder_seq2seq(**seq2seq_args)
-                    
       elif self.seq2seq_mode == 'vae':
         logging.info("Creating embedding rnn variational autoencoder")
         seq2seq_args.update(num_symbols=source_vocab_size,
                             latent_size=latent_size,
                             transfer_func=tf.nn.relu,
-                            latent_state=encoder_state)
+                            latent_state=encoder_state,
+                            anneal_scale=self.anneal_scale,
+                            kl_min=self.kl_min,
+                            feed_prev_p=feed_prev_p)
         return tf.nn.seq2seq.embedding_rnn_vae_seq2seq(**seq2seq_args)
       else:
         logging.info('Creating embedding attention model')
@@ -244,7 +249,7 @@ class Seq2SeqModel(object):
     self.encoder_inputs = []
     self.encoder_states = tf.placeholder(tf.float32, shape=[1, None])
     self.decoder_inputs = []
-    self.decoder_src = []
+    self.feed_prev_p = tf.placeholder(tf.float32, shape=[])
     self.target_weights = []
     self.targets = []
       
@@ -254,8 +259,6 @@ class Seq2SeqModel(object):
     for i in xrange(buckets[-1][1] + 1):
       self.decoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
                                                 name="decoder{0}".format(i)))
-      self.decoder_src.append(tf.placeholder(tf.int32, shape=[None],
-                                             name="decoder_src{0}".format(i)))
       self.target_weights.append(tf.placeholder(dtype, shape=[None],
                                                 name="weight{0}".format(i)))
       self.targets.append(tf.placeholder(tf.int32, shape=[None],
@@ -283,31 +286,23 @@ class Seq2SeqModel(object):
 
     # Training outputs and losses.
     def adjust_loss_vae():
-      self.anneal_scale = tf.placeholder(tf.float32, shape=[], name="anneal_scale")
       self.reconstruct_loss = [tf.placeholder(tf.float32, shape=[]) for _ in range(len(self.losses))]
       self.kl_loss = [tf.placeholder(tf.float32, shape=[]) for _ in range(len(self.losses))]
       for b in range(len(self.losses)):
         self.reconstruct_loss[b] = self.losses[b][0]
-        self.kl_loss[b] = self.losses[b][1]
-        if self.kl_min > 0.0:
-          self.kl_loss[b] = max(self.kl_min, self.kl_loss[b])
-        self.losses[b] = tf.add(self.reconstruct_loss[b], tf.mul(self.anneal_scale, self.kl_loss[b]))
+        self.kl_loss[b] = self.losses[b][1] 
+        self.losses[b] = tf.add(self.reconstruct_loss[b], self.kl_loss[b])
 
-    model_args = {'encoder_inputs': self.encoder_inputs, 'decoder_inputs': self.decoder_inputs, 
-            'targets': self.targets, 'weights': self.target_weights, 'buckets': buckets, 
-            'seq2seq': lambda x, y, z: seq2seq_f(x, y, False, z),
-            'softmax_loss_function': softmax_loss_function}
-    if self.seq2seq_mode == 'vae':
-      bucket_model = tf.nn.seq2seq.vae_with_buckets_states
-    else:
-      bucket_model = tf.nn.seq2seq.model_with_buckets_states
+    state = self.encoder_states if hidden else None
+    feed_prev = self.feed_prev_p if (self.scheduled_sample and not forward_only) else None
+    model_args = dict(encoder_inputs=self.encoder_inputs, decoder_inputs=self.decoder_inputs, 
+                      targets=self.targets, weights=self.target_weights, buckets=buckets, 
+                      seq2seq=lambda a, b, c, d, e: seq2seq_f(a, b, False, c, d, e),
+                      softmax_loss_function=softmax_loss_function,
+                      encoder_states=state, feed_prev_p=feed_prev)
     if forward_only:
-      if hidden:
-        model_args['seq2seq'] = lambda a, b, c, d: seq2seq_f(a, b, True, c, d)
-        model_args['encoder_states'] = self.encoder_states
-      else:
-        model_args['seq2seq'] = lambda x, y, z: seq2seq_f(x, y, True, z)
-      self.outputs, self.losses, self.states = bucket_model(**model_args)
+      model_args.update(seq2seq=lambda a, b, c, d, e: seq2seq_f(a, b, True, c, d, e))
+      self.outputs, self.losses, self.states = tf.nn.seq2seq.model_with_buckets_states(**model_args)
       # If we use output projection, we need to project outputs for decoding.
       if output_projection is not None:
         for b in xrange(len(buckets)):
@@ -317,7 +312,7 @@ class Seq2SeqModel(object):
           self.outputs[b] = [tf.matmul(output, output_projection[0]) + output_projection[1]
                              for output in self.outputs[b]]
     else:
-      self.outputs, self.losses, self.states = bucket_model(**model_args)
+      self.outputs, self.losses, self.states = tf.nn.seq2seq.model_with_buckets_states(**model_args)
     if self.seq2seq_mode == 'vae':
       adjust_loss_vae()
 
@@ -393,26 +388,15 @@ class Seq2SeqModel(object):
         return out
       else:
         return words
-      
-    def schedule(words):
-      # Boolean markers for linear scheduled sampling
-      feed_prev = []
-      p_feed_prev = min(1.0, self.global_step.eval()/self.scheduled_sample_steps)
-      for word in words:
-        if word == data_utils.GO_ID or np.random.uniform() < p_feed_prev:
-          feed_prev.append(False)
-        else:
-          feed_prev.append(True)
-      return feed_prev
-      
+        
     # Input feed: encoder inputs, decoder inputs, target_weights, as provided.
     input_feed = {}
     for l in xrange(encoder_size):
       input_feed[self.encoder_inputs[l].name] = encoder_inputs[l]
     for l in xrange(decoder_size):
       input_feed[self.decoder_inputs[l].name] = word_dropout(decoder_inputs[l])
-      if self.scheduled_sample:
-        input_feed[self.decoder_src[l].name] = schedule(decoder_inputs[l])
+      if self.scheduled_sample and not forward_only:
+        input_feed[self.feed_prev_p.name] = min(1.0, self.global_step.eval() / self.scheduled_sample_steps)
       input_feed[self.target_weights[l].name] = target_weights[l]
       if l < decoder_size - 1:
         input_feed[self.targets[l].name] = decoder_inputs[l + 1]
@@ -429,11 +413,9 @@ class Seq2SeqModel(object):
     if bow_mask is not None:
       logging.debug("Using bow mask for decoder: feed")
       input_feed[self.bow_mask.name] = bow_mask
-
     if hidden is not None:
       logging.debug("Decoding from hidden layer")
       input_feed[self.encoder_states.name] = hidden
-    
     if self.seq2seq_mode == 'vae':
       anneal_scale = 1
       if self.annealing and not forward_only:
@@ -518,7 +500,14 @@ class Seq2SeqModel(object):
       forward_only, hidden=hidden)
     
     # Output feed: depends on whether we do a backward step or not.
-    if not forward_only:                 
+    if not forward_only:    
+      if self.seq2seq_mode == 'vae' and self.global_step.eval() % 200 == 0:
+        kl_loss, reconstruct_loss = session.run([self.kl_loss[bucket_id],
+                                                 self.reconstruct_loss[bucket_id]],
+                                                input_feed)
+        logging.info("Step {}: KL loss {}, reconstruction loss {} ".format(self.global_step.eval(), 
+                                                                           kl_loss,
+                                                                           reconstruct_loss))
       output_feed = [self.updates[bucket_id],  # Update Op that does SGD.
                      self.gradient_norms[bucket_id],  # Gradient norm.
                      self.losses[bucket_id]]  # Loss for this batch.

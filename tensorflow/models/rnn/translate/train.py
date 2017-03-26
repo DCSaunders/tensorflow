@@ -89,9 +89,8 @@ tf.app.flags.DEFINE_boolean("annealing", False, "Use KL cost annealing for VAE t
 tf.app.flags.DEFINE_boolean("scheduled_sample", True, "Use scheduled sampling, as in https://arxiv.org/abs/1506.03099")
 tf.app.flags.DEFINE_integer("scheduled_sample_steps", 1000, "Steps over which to linearly anneal the probability of decoding given the ground truth from 1.0 to 0.0")
 tf.app.flags.DEFINE_integer("kl_annealing_steps", 1000, "Steps over which to linearly anneal the KL loss from 0 to 1")
-tf.app.flags.DEFINE_float("word_keep_prob", 0.7, "Probability of not replacing decoder input word with UNK during training")
+tf.app.flags.DEFINE_float("word_keep_prob", 1.0, "Probability of not replacing decoder input word with UNK during training")
 tf.app.flags.DEFINE_float("kl_min", 0.0, "If >0, use minimum information criterion on KL loss as in https://arxiv.org/abs/1606.04934")
-tf.app.flags.DEFINE_float("word_keep_prob", 0.7, "Probability of not replacing decoder input word with UNK during training")
 
 # Optimization settings
 tf.app.flags.DEFINE_string("opt_algorithm", "sgd", "Optimization algorithm: sgd, adagrad, adadelta")
