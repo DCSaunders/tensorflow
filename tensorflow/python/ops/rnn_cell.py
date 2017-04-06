@@ -254,7 +254,6 @@ class LSTMStateTuple(_LSTMStateTuple):
                       (str(c.dtype), str(h.dtype)))
     return c.dtype
 
-
 class BasicLSTMCell(RNNCell):
   """Basic LSTM recurrent network cell.
 

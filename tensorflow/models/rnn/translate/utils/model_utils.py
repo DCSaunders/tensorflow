@@ -171,7 +171,9 @@ def get_Seq2SeqModel(config, buckets, forward_only, rename_variable_prefix=None,
       scheduled_sample=config['scheduled_sample'],
       scheduled_sample_steps=config['scheduled_sample_steps'],
       kl_min=config['kl_min'],
-      seq2seq_mode=config['seq2seq_mode'])
+      concat_encoded=config['concat_encoded'],
+      seq2seq_mode=config['seq2seq_mode'],
+      sample_mean=config['sample_mean'])
 
 def get_singlestep_Seq2SeqModel(config, buckets):
   return tf_seq2seq.TFSeq2SeqEngine(
@@ -188,7 +190,7 @@ def get_singlestep_Seq2SeqModel(config, buckets):
       init_const=config['bow_init_const'], use_bow_mask=config['use_bow_mask'],
       initializer=get_initializer(config),
       legacy=config['legacy'],
-    seq2seq_mode=config['seq2seq_mode'])
+      seq2seq_mode=config['seq2seq_mode'])
   
 def rename_variable_prefix(config):
   logging.info("Rename model variables with prefix %s" % config['variable_prefix'])

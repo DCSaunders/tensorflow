@@ -86,6 +86,8 @@ tf.app.flags.DEFINE_boolean("use_bow_mask", False, "Normalize decoder output lay
 # Extra model configuration for VAE model
 tf.app.flags.DEFINE_integer("latent_size", 20, "Size of VAE latent state.")
 tf.app.flags.DEFINE_boolean("annealing", False, "Use KL cost annealing for VAE training")
+tf.app.flags.DEFINE_boolean("concat_encoded", False, "Concatenate the encoded input sentence to the decoder input")
+tf.app.flags.DEFINE_boolean("sample_mean", False, "Sample from mean of parameterised distribution without applying noise")
 tf.app.flags.DEFINE_boolean("scheduled_sample", True, "Use scheduled sampling, as in https://arxiv.org/abs/1506.03099")
 tf.app.flags.DEFINE_integer("scheduled_sample_steps", 1000, "Steps over which to linearly anneal the probability of decoding given the ground truth from 1.0 to 0.0")
 tf.app.flags.DEFINE_integer("kl_annealing_steps", 1000, "Steps over which to linearly anneal the KL loss from 0 to 1")

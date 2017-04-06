@@ -83,6 +83,8 @@ class Seq2SeqModel(object):
                scheduled_sample=True,
                scheduled_sample_steps=1000,
                kl_min=0.0,
+               sample_mean=False,
+               concat_encoded=False,
                seq2seq_mode="nmt"):
     """Create the model.
 
@@ -121,8 +123,7 @@ class Seq2SeqModel(object):
     self.annealing = annealing
     self.anneal_steps = anneal_steps
     self.scheduled_sample = scheduled_sample
-    self.scheduled_sample_steps = 1000
-    self.kl_min = kl_min
+    self.scheduled_sample_steps = scheduled_sample_steps
     self.word_keep_prob = word_keep_prob
     self.anneal_scale = tf.placeholder(tf.float32, shape=[])
 
@@ -151,43 +152,44 @@ class Seq2SeqModel(object):
       softmax_loss_function = sampled_loss
     else:
       logging.info("Using maxout_layer=%r and full softmax loss" % maxout_layer)
-
-    # Create the internal multi-layer cell for our RNN.
-    if use_lstm:
-      logging.info("Using LSTM cells of size={}".format(hidden_size))
-      if initializer:
-        single_cell = tf.nn.rnn_cell.LSTMCell(hidden_size, initializer=initializer)
+    
+    def get_cell(n_hidden):
+      logging.info("Constructing cell of size={}".format(n_hidden))
+      if use_lstm:
+        logging.info("Using LSTM cells")
+        if initializer:
+          single_cell = tf.nn.rnn_cell.LSTMCell(n_hidden, initializer=initializer)
+        else:
+          # to use peephole connections, cell clipping or a projection layer, use LSTMCell
+          single_cell = tf.nn.rnn_cell.BasicLSTMCell(n_hidden)
       else:
-        # NOTE: to use peephole connections, cell clipping or a projection layer, use LSTMCell instead
-        single_cell = tf.nn.rnn_cell.BasicLSTMCell(hidden_size)
-    else:
-      logging.info("Using GRU cells of size={}".format(hidden_size))
-      single_cell = tf.nn.rnn_cell.GRUCell(hidden_size)
-    cell = single_cell
-    if not forward_only and use_lstm and keep_prob < 1:
-      logging.info("Adding dropout wrapper around lstm cells")
-      single_cell = tf.nn.rnn_cell.DropoutWrapper(
-        single_cell, output_keep_prob=keep_prob)
-    if encoder == "bidirectional":
-      logging.info("Bidirectional model")
-      if init_backward:
-        logging.info("Use backward encoder state to initialize decoder state")
-      cell = BidirectionalRNNCell([single_cell] * 2)
-    elif encoder == "bow":
-      logging.info("BOW model")
+        logging.info("Using GRU cells")
+        single_cell = tf.nn.rnn_cell.GRUCell(n_hidden)
+      cell = single_cell
       if not forward_only and use_lstm and keep_prob < 1:
         logging.info("Adding dropout wrapper around lstm cells")
-        single_cell = tf.nn.rnn_cell.DropoutWrapper(
-            single_cell, output_keep_prob=keep_prob)
-      if num_layers > 1:
-        logging.info("Model with %d layers for the decoder" % num_layers)
-        cell = BOWCell(tf.nn.rnn_cell.MultiRNNCell([single_cell] * num_layers))
-      else:
-        cell = BOWCell(single_cell)
-    elif num_layers > 1:
-      logging.info("Model with %d layers" % num_layers)
-      cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * num_layers)
+        single_cell = tf.nn.rnn_cell.DropoutWrapper(single_cell, output_keep_prob=keep_prob)
+      if encoder == "bidirectional":
+        logging.info("Bidirectional model")
+        if init_backward:
+          logging.info("Use backward encoder state to initialize decoder state")
+        cell = BidirectionalRNNCell([single_cell] * 2)
+      elif encoder == "bow":
+        logging.info("BOW model")
+        if num_layers > 1:
+          logging.info("Model with %d layers for the decoder" % num_layers)
+          cell = BOWCell(tf.nn.rnn_cell.MultiRNNCell([single_cell] * num_layers))
+        else:
+          cell = BOWCell(single_cell)
+      elif num_layers > 1:
+        logging.info("Model with %d layers" % num_layers)
+        cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * num_layers)
+      return cell
 
+    cell = get_cell(hidden_size)
+    dec_cell = cell
+    if concat_encoded and self.seq2seq_mode == 'vae':
+      dec_cell = get_cell(hidden_size + latent_size)
 
     # The seq2seq function: we use embedding for the input and attention.
     logging.info("Embedding size={}".format(embedding_size))
@@ -217,22 +219,23 @@ class Seq2SeqModel(object):
                           init_backward=init_backward,
                           scope=scope,
                           legacy=legacy)
-      if self.seq2seq_mode == 'autoencoder':
-        logging.info("Creating embedding rnn autoencoder")
-        seq2seq_args.update(num_symbols=source_vocab_size,
-                            hidden_state=encoder_state,
-                            feed_prev_p=feed_prev_p)
-        return tf.nn.seq2seq.embedding_rnn_autoencoder_seq2seq(**seq2seq_args)
-      elif self.seq2seq_mode == 'vae':
-        logging.info("Creating embedding rnn variational autoencoder")
-        seq2seq_args.update(num_symbols=source_vocab_size,
-                            latent_size=latent_size,
-                            transfer_func=tf.nn.relu,
-                            latent_state=encoder_state,
-                            anneal_scale=self.anneal_scale,
-                            kl_min=self.kl_min,
-                            feed_prev_p=feed_prev_p)
-        return tf.nn.seq2seq.embedding_rnn_vae_seq2seq(**seq2seq_args)
+      if self.seq2seq_mode in ('autoencoder', 'vae'):
+        seq2seq_args.update(num_symbols=source_vocab_size, feed_prev_p=feed_prev_p)
+        if self.seq2seq_mode == 'vae':
+          logging.info("Creating embedding rnn variational autoencoder")
+          seq2seq_args.update(latent_size=latent_size,
+                              transfer_func=tf.nn.relu,
+                              latent_state=encoder_state,
+                              anneal_scale=self.anneal_scale,
+                              kl_min=kl_min,
+                              sample_mean=sample_mean,
+                              concat_encoded=concat_encoded,
+                              dec_cell=dec_cell)
+          return tf.nn.seq2seq.embedding_rnn_vae_seq2seq(**seq2seq_args)
+        else:
+          logging.info("Creating embedding rnn autoencoder")
+          seq2seq_args.update(hidden_state=encoder_state)
+          return tf.nn.seq2seq.embedding_rnn_autoencoder_seq2seq(**seq2seq_args)
       else:
         logging.info('Creating embedding attention model')
         seq2seq_args.update(num_encoder_symbols=source_vocab_size,
@@ -292,7 +295,6 @@ class Seq2SeqModel(object):
         self.reconstruct_loss[b] = self.losses[b][0]
         self.kl_loss[b] = self.losses[b][1] 
         self.losses[b] = tf.add(self.reconstruct_loss[b], self.kl_loss[b])
-
     state = self.encoder_states if hidden else None
     feed_prev = self.feed_prev_p if (self.scheduled_sample and not forward_only) else None
     model_args = dict(encoder_inputs=self.encoder_inputs, decoder_inputs=self.decoder_inputs, 
@@ -630,8 +632,7 @@ class Seq2SeqModel(object):
     sequence_length = None
     if self.sequence_length is not None:
       sequence_length = np.array([enc_input_lengths[batch_idx]
-                                for batch_idx in xrange(self.batch_size)], dtype=np.int32)                                
-
+                                for batch_idx in xrange(self.batch_size)], dtype=np.int32)            
     for batch_idx in xrange(self.batch_size):
       logging.debug("encoder input={}".format(encoder_inputs[batch_idx]))
     logging.debug("Sequence length={}".format(sequence_length))

@@ -113,11 +113,16 @@ def unpickle_hidden(config, out, max_sentences=0):
 
 def decode_interpolate_hidden(config, out, max_sentences=0):
   hidden_list = []
-  hidden_size = config['hidden_size']
   num_decoded = 0
   with tf.Session() as session:
     model = model_utils.create_model(session, config, forward_only=True, hidden=True)
     model.batch_size = 1  # We decode one sentence at a time.
+    if model.seq2seq_mode == 'autoencoder':
+      resize_dim = config['hidden_size']
+      if config['use_lstm']:
+        resize_dim *= 2
+    else:
+      resize_dim = config['latent_size']
 
     with open(config['decode_interpolate_hidden'], 'rb') as f_in:
       label_samples = cPickle.load(f_in)
@@ -127,7 +132,7 @@ def decode_interpolate_hidden(config, out, max_sentences=0):
         for interp_list in label_samples[label]:
           log_msg(config['test_out_idx'], 'New interpolation set\n')
           for i in range(0, len(interp_list)):
-            interp_list[i] = interp_list[i].reshape(1, 2*hidden_size)
+            interp_list[i] = interp_list[i].reshape(1, resize_dim)
           decode_hidden(session, model, config, out, interp_list, append=True)
           num_decoded += 1
           if num_decoded > max_sentences and max_sentences > 0:

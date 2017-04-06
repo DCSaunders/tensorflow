@@ -162,6 +162,7 @@ def rnn_decoder(decoder_inputs, initial_state, cell, loop_function=None,
           return inp
 
         if feed_prev_p is not None:
+          #logging.info('Decoding with scheduled sampling')
           rv = tf.random_uniform([], minval=0, maxval=1, dtype=tf.float32)
           feed_prev = (loop_function is not None) and tf.less(rv, feed_prev_p)
           inp = control_flow_ops.cond(feed_prev,
@@ -450,6 +451,9 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
         reverse=True)
       initial_state = encoder_state
 
+    if hidden_state is not None and isinstance(cell.state_size, tuple):
+      hidden_state = tuple(tf.split(1, 2, hidden_state))
+
     # Decoder.
     if output_projection is None:
       cell = rnn_cell.OutputProjectionWrapper(cell, num_symbols)
@@ -500,8 +504,11 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
                               output_projection=None, feed_previous=False,
                               dtype=dtypes.float32, scope=None, encoder=None,
                               sequence_length=None, bucket_length=None,
-                              init_backward=False, latent_state=None, initializer=None,
-                              legacy=False, feed_prev_p=None, kl_min=0.0, anneal_scale=None):
+                              init_backward=False, latent_state=None,
+                              initializer=None, legacy=False,
+                              feed_prev_p=None, kl_min=0.0,
+                              anneal_scale=None, sample_mean=False,
+                              dec_cell=None, concat_encoded=False):
   with variable_scope.variable_scope(
     scope or "embedding_rnn_seq2seq", dtype=dtype) as scope:
     dtype = scope.dtype
@@ -512,37 +519,38 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
       encoder_cell_bw = rnn_cell.EmbeddingWrapper(
         cell.get_bw_cell(), embedding_classes=num_symbols,
         embedding_size=embedding_size, initializer=initializer)
-      _, encoder_out_state, encoder_state_bw = rnn.bidirectional_rnn(encoder_cell_fw, encoder_cell_bw,
+      _, encoder_state, encoder_state_bw = rnn.bidirectional_rnn(encoder_cell_fw, encoder_cell_bw,
                                                     encoder_inputs, dtype=dtype,
                                                     sequence_length=sequence_length,
                                                     bucket_length=bucket_length,
                                                     legacy=legacy)
-      logging.info("Bidirectional state size=%d" % cell.state_size) # double the size for lstms
       if init_backward:
-        cell = cell.get_bw_cell()
+        enc_cell = encoder_cell_bw
+        dec_cell = dec_cell.get_bw_cell()
         encoder_out_state = encoder_state_bw
       else:
-        cell = cell.get_fw_cell()
+        enc_cell = encoder_cell_fw
+        dec_cell = dec_cell.get_fw_cell()
         encoder_out_state = encoder_state
     elif encoder == "reverse":
-      encoder_cell = rnn_cell.EmbeddingWrapper(
+      enc_cell = rnn_cell.EmbeddingWrapper(
         cell, embedding_classes=num_symbols,
         embedding_size=embedding_size, initializer=initializer)
       _, encoder_out_state = rnn.rnn(
-        encoder_cell, encoder_inputs, dtype=dtype,
+        enc_cell, encoder_inputs, dtype=dtype,
         sequence_length=sequence_length, bucket_length=bucket_length,
         reverse=True)
-      logging.info("Unidirectional state size=%d" % cell.state_size)
+      dec_cell = dec_cell.get_bw_cell()
 
     # Decoder.
     if output_projection is None:
-      cell = rnn_cell.OutputProjectionWrapper(cell, num_symbols)
+      dec_cell = rnn_cell.OutputProjectionWrapper(dec_cell, num_symbols)
  
     # Latent state
-    if isinstance(cell.state_size, tuple):
+    if isinstance(encoder_out_state, tuple):
       encoder_out_state = tf.concat(concat_dim=1, values=encoder_out_state)
 
-    enc_state_size = get_state_size(cell)
+    enc_state_size = get_state_size(enc_cell)
     z_mean_w = tf.get_variable('z_mean_w', [enc_state_size, latent_size])
     z_mean_b = tf.get_variable('z_mean_b', [latent_size])
     z_logvar_w = tf.get_variable('z_logvar_w', [enc_state_size, latent_size])
@@ -561,52 +569,49 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
       kl_obj = tf.reduce_sum(kl_step_av)
     if anneal_scale is not None:
       kl_obj = tf.multiply(anneal_scale, kl_obj)
+    
+    if sample_mean and feed_previous:
+      logging.info('Generating directly from mean')
+      z = z_mean
+    if latent_state is not None:
+      logging.info('Decoding from hiden state')
+      z = latent_state
+      feed_prev_p = None
 
-    dec_state_size = get_state_size(cell)
-    dec_in_w = tf.get_variable('dec_in_w', [latent_size, dec_state_size])
-    dec_in_b = tf.get_variable('dec_in_b', [dec_state_size])
-    initial_state = transfer_func(tf.add(tf.matmul(z, dec_in_w), dec_in_b))
-
-    if isinstance(cell.state_size, tuple):
-      initial_state = tuple(tf.split(1, 2, initial_state))
+    if concat_encoded:
+      logging.info('Concatenating latent and hidden states')
+      if isinstance(enc_cell.state_size, tuple):
+        enc_state_tuple = tuple(tf.split(1, 2, encoder_out_state))
+        initial_state = (tf.concat(concat_dim=1, values=[state, z]) 
+                         for state in enc_state_tuple)
+      else:
+        initial_state = tf.concat(concat_dim=1, values=[initial_state, z])
+    else:
+      dec_state_size = get_state_size(dec_cell)
+      dec_in_w = tf.get_variable('dec_in_w', [latent_size, dec_state_size])
+      dec_in_b = tf.get_variable('dec_in_b', [dec_state_size])
+      initial_state = transfer_func(tf.add(tf.matmul(z, dec_in_w), dec_in_b))
+      if isinstance(enc_cell.state_size, tuple):
+        initial_state = tuple(tf.split(1, 2, initial_state))
 
     if isinstance(feed_previous, bool):
-      if latent_state is not None:
-        gen_state = transfer_func(tf.add(tf.matmul(latent_state, dec_in_w), dec_in_b))
-        logging.info('Decoding from hidden state')
-        outputs, state = embedding_rnn_decoder(
-          decoder_inputs, gen_state, cell, num_symbols,
-          embedding_size, output_projection=output_projection,
-          feed_previous=feed_previous)
-      else:
-        outputs, state = embedding_rnn_decoder(
-          decoder_inputs, initial_state, cell, num_symbols,
-          embedding_size, output_projection=output_projection,
-          feed_previous=feed_previous, feed_prev_p=feed_prev_p)
-      return outputs, initial_state, kl_obj
+      outputs, state = embedding_rnn_decoder(
+        decoder_inputs, initial_state, dec_cell, num_symbols,
+        embedding_size, output_projection=output_projection,
+        feed_previous=feed_previous, feed_prev_p=feed_prev_p)
+      return outputs, z, kl_obj
 
     # If feed_previous is a Tensor, we construct 2 graphs and use cond.
     def decoder(feed_previous_bool):
       reuse = None if feed_previous_bool else True
       with variable_scope.variable_scope(variable_scope.get_variable_scope(),
                                          reuse=reuse):
-        initial_state = transfer_func(tf.add(tf.matmul(z, dec_in_w), dec_in_b))
-
-        if latent_state is not None:
-          gen_state = transfer_func(tf.add(tf.matmul(latent_state, dec_in_w), dec_in_b))
-          logging.info('Decoding from latent state')
-          outputs, state = embedding_rnn_decoder(
-            decoder_inputs, gen_state, cell, num_symbols,
-            embedding_size, output_projection=output_projection,
-            feed_previous=feed_previous_bool,
-            update_embedding_for_previous=False)
-        else:
-          outputs, state = embedding_rnn_decoder(
-            decoder_inputs, initial_state, cell, num_symbols,
-            embedding_size, output_projection=output_projection,
-            feed_previous=feed_previous_bool,
-            update_embedding_for_previous=False, feed_prev_p=feed_prev_p)
-        return outputs + [initial_state]
+        outputs, state = embedding_rnn_decoder(
+          decoder_inputs, initial_state, dec_cell, num_symbols,
+          embedding_size, output_projection=output_projection,
+          feed_previous=feed_previous_bool,
+          update_embedding_for_previous=False, feed_prev_p=feed_prev_p)
+        return outputs + [z]
 
     outputs_and_state = control_flow_ops.cond(feed_previous,
                                               lambda: decoder(True),
@@ -1186,14 +1191,14 @@ def embedding_attention_seq2seq(encoder_inputs,
                                  bucket_length=bucket_length,
                                  legacy=legacy)
 
-      logging.debug("Bidirectional state size=%d" % cell.state_size) # this shows double the size for lstms
+      #logging.debug("Bidirectional state size=%d" % cell.state_size) # this shows double the size for lstms
     elif encoder == "reverse":
       encoder_cell = rnn_cell.EmbeddingWrapper(
         cell, embedding_classes=num_encoder_symbols,
         embedding_size=embedding_size, initializer=initializer)
       encoder_outputs, encoder_state = rnn.rnn(
         encoder_cell, encoder_inputs, dtype=dtype, sequence_length=sequence_length, bucket_length=bucket_length, reverse=True)
-      logging.debug("Unidirectional state size=%d" % cell.state_size)
+      #logging.debug("Unidirectional state size=%d" % cell.state_size)
     elif encoder == "bow":
       if keep_prob < 1:
         logging.info("Applying dropout to input embeddings")
@@ -1486,7 +1491,6 @@ def model_with_buckets_states(encoder_inputs, decoder_inputs, targets, weights,
   if len(weights) < buckets[-1][1]:
     raise ValueError("Length of weights (%d) must be at least that of last"
                      "bucket (%d)." % (len(weights), buckets[-1][1]))
-
   all_inputs = encoder_inputs + decoder_inputs + targets + weights
   losses = []
   outputs = []
