@@ -220,12 +220,12 @@ class Seq2SeqModel(object):
                           scope=scope,
                           legacy=legacy)
       if self.seq2seq_mode in ('autoencoder', 'vae'):
-        seq2seq_args.update(num_symbols=source_vocab_size, feed_prev_p=feed_prev_p)
+        seq2seq_args.update(num_symbols=source_vocab_size, feed_prev_p=feed_prev_p,
+                            hidden_state=encoder_state)
         if self.seq2seq_mode == 'vae':
           logging.info("Creating embedding rnn variational autoencoder")
           seq2seq_args.update(latent_size=latent_size,
                               transfer_func=tf.nn.relu,
-                              latent_state=encoder_state,
                               anneal_scale=self.anneal_scale,
                               kl_min=kl_min,
                               sample_mean=sample_mean,
@@ -234,7 +234,6 @@ class Seq2SeqModel(object):
           return tf.nn.seq2seq.embedding_rnn_vae_seq2seq(**seq2seq_args)
         else:
           logging.info("Creating embedding rnn autoencoder")
-          seq2seq_args.update(hidden_state=encoder_state)
           return tf.nn.seq2seq.embedding_rnn_autoencoder_seq2seq(**seq2seq_args)
       else:
         logging.info('Creating embedding attention model')
@@ -250,7 +249,8 @@ class Seq2SeqModel(object):
                     
     # Feeds for inputs.
     self.encoder_inputs = []
-    self.encoder_states = tf.placeholder(tf.float32, shape=[1, None])
+    enc_state_size = 2 * hidden_size if use_lstm else hidden_size
+    self.encoder_states = tf.placeholder(tf.float32, shape=[None, enc_state_size])
     self.decoder_inputs = []
     self.feed_prev_p = tf.placeholder(tf.float32, shape=[])
     self.target_weights = []
