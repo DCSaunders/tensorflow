@@ -85,7 +85,10 @@ class Seq2SeqModel(object):
                kl_min=0.0,
                sample_mean=False,
                concat_encoded=False,
-               seq2seq_mode="nmt"):
+               seq2seq_mode="nmt",
+               bow_no_replace=False,
+               grammar=None,
+               mean_kl=False):
     """Create the model.
 
     Args:
@@ -125,7 +128,11 @@ class Seq2SeqModel(object):
     self.scheduled_sample = scheduled_sample
     self.scheduled_sample_steps = scheduled_sample_steps
     self.word_keep_prob = word_keep_prob
+    self.bow_no_replace = bow_no_replace
     self.anneal_scale = tf.placeholder(tf.float32, shape=[])
+    
+    if grammar is not None:
+      grammar.batch_size = self.batch_size
 
     # If we use sampled softmax, we need an output projection.
     output_projection = None
@@ -218,10 +225,13 @@ class Seq2SeqModel(object):
                           bucket_length=bucket_length,
                           init_backward=init_backward,
                           scope=scope,
-                          legacy=legacy)
+                          legacy=legacy,
+                          bow_mask=self.bow_mask)
       if self.seq2seq_mode in ('autoencoder', 'vae'):
-        seq2seq_args.update(num_symbols=source_vocab_size, feed_prev_p=feed_prev_p,
-                            hidden_state=encoder_state)
+        seq2seq_args.update(num_symbols=source_vocab_size,
+                            feed_prev_p=feed_prev_p,
+                            hidden_state=encoder_state,
+                            bow_no_replace=bow_no_replace)
         if self.seq2seq_mode == 'vae':
           logging.info("Creating embedding rnn variational autoencoder")
           seq2seq_args.update(latent_size=latent_size,
@@ -230,7 +240,9 @@ class Seq2SeqModel(object):
                               kl_min=kl_min,
                               sample_mean=sample_mean,
                               concat_encoded=concat_encoded,
-                              dec_cell=dec_cell)
+                              dec_cell=dec_cell,
+                              mean_kl=mean_kl,
+                              grammar=grammar)
           return tf.nn.seq2seq.embedding_rnn_vae_seq2seq(**seq2seq_args)
         else:
           logging.info("Creating embedding rnn autoencoder")
@@ -243,7 +255,6 @@ class Seq2SeqModel(object):
                             maxout_layer=maxout_layer,
                             bow_emb_size=hidden_size,
                             init_const=init_const,
-                            bow_mask=self.bow_mask,
                             keep_prob=keep_prob)
         return tf.nn.seq2seq.embedding_attention_seq2seq(**seq2seq_args)
                     
@@ -585,7 +596,7 @@ class Seq2SeqModel(object):
       src_mask = np.ones((self.batch_size, encoder_size), dtype=np.float32)
 
     bow_mask = None
-    if encoder == "bow" and self.bow_mask is not None:
+    if self.bow_mask is not None:
       bow_mask = np.zeros((self.batch_size, self.target_vocab_size), dtype=np.float32)
 
     # Batch encoder inputs are just re-indexed encoder_inputs.
@@ -597,11 +608,14 @@ class Seq2SeqModel(object):
           if self.no_pad_symbol:
             encoder_inputs[batch_idx][length_idx] = data_utils.EOS_ID
 
-        if encoder == "bow" and self.bow_mask is not None:
+        if self.bow_mask is not None:
           word_id = encoder_inputs[batch_idx][length_idx]
           if word_id != data_utils.GO_ID and \
             word_id != data_utils.PAD_ID:
-              bow_mask[batch_idx][word_id] = 1.0
+              if self.bow_no_replace:
+                bow_mask[batch_idx][word_id] += 1.0
+              else:
+                bow_mask[batch_idx][word_id] = 1.0
               logging.debug("bow_mask[{}][{}]={}".format(batch_idx, word_id, bow_mask[batch_idx][word_id]))
 
       batch_encoder_inputs.append(

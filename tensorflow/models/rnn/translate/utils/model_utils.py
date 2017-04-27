@@ -59,12 +59,13 @@ def process_args(FLAGS, train=True, greedy_decoder=False):
     global _buckets
     _buckets = make_buckets(config['num_symm_buckets'], config['max_sequence_length'],
                             config['add_src_eos'], train, greedy_decoder)
-
+  
   if config['no_pad_symbol']:
     data_utils.no_pad_symbol()
     logging.info("UNK_ID=%d" % data_utils.UNK_ID)
     logging.info("PAD_ID=%d" % data_utils.PAD_ID)
-    
+  
+  config['grammar'] = data_utils.prepare_grammar(config['seq2seq_mode'], config['grammar_def'])
   return config
 
 def make_buckets(num_buckets, max_seq_len=50, add_src_eos=True, train=True, greedy_decoder=False):
@@ -173,7 +174,10 @@ def get_Seq2SeqModel(config, buckets, forward_only, rename_variable_prefix=None,
       kl_min=config['kl_min'],
       concat_encoded=config['concat_encoded'],
       seq2seq_mode=config['seq2seq_mode'],
-      sample_mean=config['sample_mean'])
+      sample_mean=config['sample_mean'],
+      bow_no_replace=config['bow_no_replace'],
+      grammar=config['grammar'],
+      mean_kl=config['mean_kl'])
 
 def get_singlestep_Seq2SeqModel(config, buckets):
   return tf_seq2seq.TFSeq2SeqEngine(

@@ -89,10 +89,14 @@ tf.app.flags.DEFINE_boolean("annealing", False, "Use KL cost annealing for VAE t
 tf.app.flags.DEFINE_boolean("concat_encoded", False, "Concatenate the encoded input sentence to the decoder input")
 tf.app.flags.DEFINE_boolean("sample_mean", False, "Sample from mean of parameterised distribution without applying noise")
 tf.app.flags.DEFINE_boolean("scheduled_sample", True, "Use scheduled sampling, as in https://arxiv.org/abs/1506.03099")
+tf.app.flags.DEFINE_boolean("bow_no_replace", False, "If use_bow_mask, sample from the bag without replacement. Has no effect otherwise.")
+tf.app.flags.DEFINE_boolean("mean_kl", False, "KL loss is mean of terms over latent space dimensions, instead of sum (downweights loss term)")
 tf.app.flags.DEFINE_integer("scheduled_sample_steps", 1000, "Steps over which to linearly anneal the probability of decoding given the ground truth from 1.0 to 0.0")
 tf.app.flags.DEFINE_integer("kl_annealing_steps", 1000, "Steps over which to linearly anneal the KL loss from 0 to 1")
 tf.app.flags.DEFINE_float("word_keep_prob", 1.0, "Probability of not replacing decoder input word with UNK during training")
 tf.app.flags.DEFINE_float("kl_min", 0.0, "If >0, use minimum information criterion on KL loss as in https://arxiv.org/abs/1606.04934")
+tf.app.flags.DEFINE_string("grammar_def", None, "File defining int-mapped grammar")
+
 
 # Optimization settings
 tf.app.flags.DEFINE_string("opt_algorithm", "sgd", "Optimization algorithm: sgd, adagrad, adadelta")
@@ -170,7 +174,7 @@ def train(config):
     current_step = model.global_step.eval()
     previous_losses = [] # used for updating learning rate (train loss)
     current_eval_ppxs = [] # used for model saving
-    current_bleu = 0 # used for model saving
+    current_bleus = {'overall': 0.0, 'bp': 0.0} # used for model saving
     current_batch_idx = None
     while True:
       current_batch_idx = model.global_step.eval() % num_train_batches
@@ -254,7 +258,7 @@ def train(config):
         if current_step % (config['steps_per_checkpoint'] * config['eval_frequency']) == 0:
           if config['eval_bleu']:
             if model.global_step.eval() >= config['eval_bleu_start']:
-              current_bleu = train_utils.decode_dev(config, model, current_bleu)
+              train_utils.decode_dev(config, model, current_bleus)
             else:
               logging.info("Waiting until global step %i for BLEU evaluation on dev" % config['eval_bleu_start'])
           else:

@@ -226,8 +226,10 @@ def run_eval(config, session, model, dev_set, current_eval_ppxs):
   else:
     return eval_ppxs
 
-def decode_dev(config, model, current_bleu):
+def decode_dev(config, model, current_bleus):
   # Greedily decode dev set
+  # current_bleus: dictionary mapping strings 'overall' and 'bp' to 
+  # current best bleu score overall/with high bp
   inp = config['dev_src_idx']
   out = os.path.join(config['train_dir'], "dev.out")
   ref = config['dev_trg_idx']
@@ -235,20 +237,25 @@ def decode_dev(config, model, current_bleu):
   with g2.as_default() as g:
     from tensorflow.models.rnn.translate.decode import decode
     decode(config, input=inp, output=out, max_sentences=config['eval_bleu_size'])
-  bleu = eval_set(out, ref)
-
+  bleu, bp = eval_set(out, ref)
+  
   # If the current model improves over the results of the previous dev eval, overwrite the dev_bleu model
   current_model = make_model_path(config, str(model.global_step.eval()))
   dev_bleu_model = make_model_path(config, "dev_bleu")
-  if bleu > current_bleu:
-    current_bleu = bleu
+  dev_bp_bleu_model = make_model_path(config, "dev_bp_bleu")
+  logging.info(current_bleus)
+  if bleu > current_bleus['overall']:
+    current_bleus['overall'] = bleu
     shutil.copy(current_model, dev_bleu_model)
     shutil.copy(current_model+".meta", dev_bleu_model+".meta")
     logging.info("Model %s achieves new best BLEU=%.2f, updating %s" % (current_model, bleu, dev_bleu_model))
-    return bleu
   else:
-    logging.info("Model %s does not achieve higher BLEU, not updating %s" % (current_model, dev_bleu_model))
-    return current_bleu
+    logging.info("Model %s does not achieve higher BLEU, not updating %s" % (current_model, dev_bleu_model)) 
+  if bleu > current_bleus['bp'] and bp >= 0.985:
+    current_bleus['bp'] = bleu
+    logging.info('Updating best high-BP model with BLEU=%.2f, BP=%.2f' % (bleu, bp))
+    shutil.copy(current_model, dev_bp_bleu_model)
+    shutil.copy(current_model+".meta", dev_bp_bleu_model+".meta")
 
 def make_model_path(config, affix):
   return os.path.join(config['train_dir'], "train.ckpt-"+affix)
@@ -263,8 +270,9 @@ def eval_set(out, ref):
     logging.info("{}".format(multibleu))
     import re
     m = re.match("BLEU = ([\d.]+),", multibleu)
-    return float(m.group(1))
+    bp = re.search("BP=([\d.]+),", multibleu)
+    return float(m.group(1)), float(bp.group(1))
   except Exception, e:
     logging.info("Multi-bleu error: {}".format(e))
-    return 0.0
+    return 0.0, 0.0
   

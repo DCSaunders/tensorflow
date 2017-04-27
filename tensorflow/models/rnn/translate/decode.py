@@ -70,11 +70,9 @@ def decode(config, input=None, output=None, max_sentences=0):
 
     with tf.Session() as session:
       # Create model and load parameters: uses the training graph for decoding
-    
+      config['batch_size'] = 1 # We decode one sentence at a time.
       model = model_utils.create_model(session, config, forward_only=True,
                                        buckets=buckets)
-      model.batch_size = 1  # We decode one sentence at a time.
-
       # Decode input file
       num_sentences = 0
       logging.info("Start decoding, max_sentences=%i" % max_sents)
@@ -106,17 +104,16 @@ def unpickle_hidden(config, out, max_sentences=0):
       except (EOFError):
         break
   with tf.Session() as session:
-    model = model_utils.create_model(session, config, forward_only=True, hidden=True)
-    model.batch_size = 1  # We decode one sentence at a time.
-    
+    config['batch_size'] = 1 # We decode one sentence at a time.
+    model = model_utils.create_model(session, config, forward_only=True, hidden=True)    
     decode_hidden(session, model, config, out, hidden_list)
 
 def decode_interpolate_hidden(config, out, max_sentences=0):
   hidden_list = []
   num_decoded = 0
   with tf.Session() as session:
+    config['batch_size'] = 1 # We decode one sentence at a time.
     model = model_utils.create_model(session, config, forward_only=True, hidden=True)
-    model.batch_size = 1  # We decode one sentence at a time.
     if model.seq2seq_mode == 'autoencoder':
       resize_dim = config['hidden_size']
       if config['use_lstm']:

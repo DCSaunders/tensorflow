@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import gzip
 import os
 import re
@@ -25,6 +26,7 @@ import tarfile
 
 from six.moves import urllib
 
+import numpy as np
 import tensorflow as tf
 from tensorflow.python.platform import gfile
 import logging
@@ -54,6 +56,10 @@ def no_pad_symbol():
   global UNK_ID
   UNK_ID = 0
   PAD_ID = -1
+
+def grammar_eos():
+  global EOS_ID
+  EOS_ID = 0
 
 def maybe_download(directory, filename, url):
   """Download filename from url unless it's already in directory."""
@@ -305,10 +311,45 @@ def get_training_data(config):
           config['train_src'], config['train_trg'], config['dev_src'], config['dev_trg'],
           config['src_lang'], config['trg_lang'])
     else:
-      logging.error("You have to provide either tokenized or integer-mapped training and dev data usinig " \
+      logging.error("You have to provide either tokenized or integer-mapped training and dev data using " \
         "--train_src, --train_trg, --dev_src, --dev_trg or --train_src_idx, --train_trg_idx, --dev_src_idx, --dev_trg_idx")
       exit(1)
     return src_train, trg_train, src_dev, trg_dev
+
+class Grammar(object):
+  def __init__(self, mask_dict, rules):
+    self.n_rules = len(rules)
+    self.n_nt = len(mask_dict)
+    self.mask = np.zeros((self.n_nt, self.n_rules))
+    self.nt_map = np.zeros((self.n_rules, self.n_nt))
+    self.nt_ids = np.arange(self.n_nt).astype(np.int32)
+    self.batch_size = 1 # reset by model
+    for nt, rule in mask_dict.items():
+      self.mask[nt, rule] = 1
+
+    for rule_id, rule in enumerate(rules):
+      for idx in rule:
+        if idx in mask_dict:
+          self.nt_map[rule_id, idx] = 1
+        
+def prepare_grammar(mode, grammar_path):
+  grammar = None
+  if mode == 'vae' and grammar_path is not None:
+    if gfile.Exists(grammar_path):
+      logging.info('Getting grammar from path {}'.format(grammar_path))
+      mask_dict = collections.defaultdict(list)
+      rules = []
+      with open(grammar_path, 'r') as f:
+        for idx, line in enumerate(f):
+          nt, rule = line.split(':')
+          # NB: this relies on non-terminals having the first indices
+          mask_dict[int(nt.strip())].append(idx)
+          rules.append(np.array(rule.strip().split()).astype(int))      
+      grammar = Grammar(mask_dict, rules)
+      grammar_eos()
+    else:
+      raise ValueError("Grammar path not found: {}".format(grammar_path))
+  return grammar
 
 def prepare_data(data_dir, src_vocabulary_size, trg_vocabulary_size,
                      train_src, train_trg, dev_src, dev_trg, src_lang, trg_lang):
