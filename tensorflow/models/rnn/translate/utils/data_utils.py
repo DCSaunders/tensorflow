@@ -317,9 +317,21 @@ def get_training_data(config):
     return src_train, trg_train, src_dev, trg_dev
 
 class Grammar(object):
-  def __init__(self, mask_dict, rules):
+  def __init__(self, mask_dict, rules, max_seq_len):
+    '''Args:
+      mask_dict: dictionary mapping non-terminal to list of rule indices where NT is the LHS
+      rules: list of RHS of each rule. Index here corresponds to input production rule index.
+    Attributes:
+      n_rules: number of rules (equivalent to vocab size)
+      n_nt: number of unique non-terminals
+      stack_zeros: number of iterations in which to add n_nt 
+      nt_ids: np range of length number of unique non-terminals
+      mask: binary numpy array. mask(i,j) = 1 if non-terminal i appears on the LHS of rule j
+      nt_map: binary numpy array. nt_map(i,j) = 1 if rule i has non-terminal j on its RHS
+    '''
     self.n_rules = len(rules)
     self.n_nt = len(mask_dict)
+    self.stack_zeros = max_seq_len / self.n_nt 
     self.mask = np.zeros((self.n_nt, self.n_rules))
     self.nt_map = np.zeros((self.n_rules, self.n_nt))
     self.nt_ids = np.arange(self.n_nt).astype(np.int32)
@@ -332,7 +344,7 @@ class Grammar(object):
         if idx in mask_dict:
           self.nt_map[rule_id, idx] = 1
         
-def prepare_grammar(mode, grammar_path):
+def prepare_grammar(mode, grammar_path, max_seq_len):
   grammar = None
   if mode == 'vae' and grammar_path is not None:
     if gfile.Exists(grammar_path):
@@ -345,7 +357,7 @@ def prepare_grammar(mode, grammar_path):
           # NB: this relies on non-terminals having the first indices
           mask_dict[int(nt.strip())].append(idx)
           rules.append(np.array(rule.strip().split()).astype(int))      
-      grammar = Grammar(mask_dict, rules)
+      grammar = Grammar(mask_dict, rules, max_seq_len)
       grammar_eos()
     else:
       raise ValueError("Grammar path not found: {}".format(grammar_path))

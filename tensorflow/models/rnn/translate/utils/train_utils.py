@@ -23,6 +23,8 @@ import pickle
 import shutil
 from collections import defaultdict
 import logging
+import subprocess
+import re
 
 from tensorflow.models.rnn.translate.utils import model_utils
 import tensorflow as tf
@@ -237,7 +239,7 @@ def decode_dev(config, model, current_bleus):
   with g2.as_default() as g:
     from tensorflow.models.rnn.translate.decode import decode
     decode(config, input=inp, output=out, max_sentences=config['eval_bleu_size'])
-  bleu, bp = eval_set(out, ref)
+  bleu, bp = eval_set(out, ref, config['eval_cmd'])
   
   # If the current model improves over the results of the previous dev eval, overwrite the dev_bleu model
   current_model = make_model_path(config, str(model.global_step.eval()))
@@ -260,15 +262,18 @@ def decode_dev(config, model, current_bleus):
 def make_model_path(config, affix):
   return os.path.join(config['train_dir'], "train.ckpt-"+affix)
 
-def eval_set(out, ref):
-  # multi-bleu.pl [-lc] reference < hypothesis
-  import subprocess
-  cat = subprocess.Popen(("cat", out), stdout=subprocess.PIPE)
+def eval_set(out, ref, cmd): 
+  def eval_args(out, ref, cmd):
+    # add path to ref idx if needed
+    cmd_with_ref = ref.join(cmd.split('REF'))
+    if len(cmd_with_ref.split('OUT')) == 1:
+      args = dict(args=cmd_with_ref.split(), stdin=open(out))
+    else:
+      args = dict(args=out.join(cmd_with_ref.split('OUT')).split())
+    return args
   try:
-    multibleu = subprocess.check_output(("/home/mifs/ds636/code/scripts/multi-bleu.perl", "-lc",
-                                       ref), stdin=cat.stdout)
+    multibleu = subprocess.check_output(**eval_args(out, ref, cmd))
     logging.info("{}".format(multibleu))
-    import re
     m = re.match("BLEU = ([\d.]+),", multibleu)
     bp = re.search("BP=([\d.]+),", multibleu)
     return float(m.group(1)), float(bp.group(1))

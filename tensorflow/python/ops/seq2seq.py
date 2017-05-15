@@ -151,8 +151,12 @@ def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_funct
         (Note that in some cases, like basic RNN cell or GRU cell, outputs and
          states can be the same. They are different for LSTM cells though.)
   """
+  def next_or_nothing(stack):
+    new_nt = []
+    for seq in stack:
+      new_nt.append(tf.slice(seq, [0], [1]))
+    return new_nt
 
-  
   with variable_scope.variable_scope(scope or "rnn_decoder"):
     state = initial_state
     prev = None
@@ -160,41 +164,35 @@ def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_funct
     # initialise non-terminal stack
     start_nt = 1
     stack = [[start_nt] for _ in range(grammar.batch_size)]  
-    stack_len = 1
     logging.info('Constraining decoder to grammar')
-
     for i, inp in enumerate(decoder_inputs):
       reuse = (i > 0)
       with variable_scope.variable_scope(scope or "rnn_decoder", reuse=reuse):
-        new_nt = tf.reshape([seq_stack.pop() for seq_stack in stack], [grammar.batch_size, 1])
-        stack_len -= 1
-
+        new_nt = tf.reshape(next_or_nothing(stack), [grammar.batch_size, 1])
         if loop_function is not None and prev is not None:
           inp = loop_function(prev, i)
-        output, state = cell(inp, state)
+        output, state = cell(inp, state) 
         new_mask = tf.gather_nd(grammar.mask, new_nt)
         output = output * tf.cast(new_mask, tf.float32)
         outputs.append(output)
         prev = output
 
-        choose = tf.argmax(tf.nn.softmax(output), 1) # replace with loop function?
-        batch_choose = tf.expand_dims(choose, 1) 
-        new_rules = tf.unstack(tf.cast(tf.gather_nd(grammar.nt_map, batch_choose), tf.int32),
+        batch_choose = tf.expand_dims(tf.argmax(tf.nn.softmax(output), 1), 1) 
+        new_rules = tf.unstack(tf.cast(
+          tf.gather_nd(grammar.nt_map, batch_choose), tf.int32),
                                grammar.batch_size)
         
-        split_rules = [tf.dynamic_partition(grammar.nt_ids, new_rules[seq], 2) 
-                       for seq in range(grammar.batch_size)]
-  
-        stack_len += grammar.n_nt
-        if stack_len > grammar.n_nt:
-          stack = [tf.unstack(tf.concat(0, (tf.zeros_like(split_rules[seq][0]),
-                                            stack[seq],
-                                            tf.reverse_v2(split_rules[seq][1], [0]))),
-                              stack_len) for seq in range(grammar.batch_size)]
+        new_nt = [tf.dynamic_partition(grammar.nt_ids, new_rules[seq], 2) 
+                     for seq in range(grammar.batch_size)]
+        if i < grammar.stack_zeros:
+          for seq_id in range(grammar.batch_size):
+            stack[seq_id] = tf.concat(0, (new_nt[seq_id][1], 
+                                          tf.slice(stack[seq_id], [0], [-1]),
+                                          new_nt[seq_id][0]))
         else:
-          stack = [tf.unstack(tf.concat(0, (tf.zeros_like(split_rules[seq][0]),
-                                            tf.reverse_v2(split_rules[seq][1], [0]))),
-                              stack_len) for seq in range(grammar.batch_size)]
+          for seq_id in range(grammar.batch_size):
+            stack[seq_id] = tf.concat(0, (new_nt[seq_id][1], 
+                                          tf.slice(stack[seq_id], [0], [-1])))
   return outputs, state
 
 def rnn_decoder(decoder_inputs, initial_state, cell, loop_function=None,
@@ -417,10 +415,11 @@ def embedding_rnn_decoder(decoder_inputs,
       loop_function = None
     emb_inp = (
         embedding_ops.embedding_lookup(embedding, i) for i in decoder_inputs)
+  
     if grammar is not None:
       return rnn_grammar_decoder(emb_inp, initial_state, cell,
                                  grammar=grammar, loop_function=loop_function)
-    else: 
+    else:
       return rnn_decoder(emb_inp, initial_state, cell,
                          loop_function=loop_function,
                          feed_prev_p=feed_prev_p,
