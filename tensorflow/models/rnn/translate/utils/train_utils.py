@@ -271,6 +271,7 @@ def eval_set(out, ref, cmd):
     else:
       args = dict(args=out.join(cmd_with_ref.split('OUT')).split())
     return args
+
   try:
     multibleu = subprocess.check_output(**eval_args(out, ref, cmd))
     logging.info("{}".format(multibleu))

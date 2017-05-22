@@ -119,7 +119,7 @@ def get_state_size(cell):
   else:
     return cell.state_size
 
-def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_function=None, scope=None):
+def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_function=None, scope=None, raw_inp=None):
   """RNN decoder for the grammar autoencoder.
 
   Args:
@@ -128,9 +128,9 @@ def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_funct
     cell: rnn_cell.RNNCell defining the cell function and size.
     grammar: object defined in data_utils containing:
       mask: 2D [non_terminal_count x rule_count] array with 1s where each nonterminal appears on the LHS of rules
-      nt_map: defaultdict(list) mapping rule idx to list of non-terminals possible after applying rule, in order
-      nt_ids: essentially range(n_nt), useful for partitioning non-terminals
+      rhs: padded list of non-terminals on RHS of each rule in order
       n_nt: int number of non-terminals in grammar
+      start: the start rule ID
       batch_size: batch size of current model
     loop_function: If not None, this function will be applied to the i-th output
   in order to generate the i+1-st input, and decoder_inputs will be ignored,
@@ -151,48 +151,36 @@ def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_funct
         (Note that in some cases, like basic RNN cell or GRU cell, outputs and
          states can be the same. They are different for LSTM cells though.)
   """
-  def next_or_nothing(stack):
-    new_nt = []
-    for seq in stack:
-      new_nt.append(tf.slice(seq, [0], [1]))
-    return new_nt
-
   with variable_scope.variable_scope(scope or "rnn_decoder"):
     state = initial_state
     prev = None
     outputs = []
-    # initialise non-terminal stack
-    start_nt = 1
-    stack = [[start_nt] for _ in range(grammar.batch_size)]  
+    stack = [tf.zeros([grammar.stack_zeros], dtype=tf.int32)
+             for _ in range(grammar.batch_size)]  
+    current_nt = [[grammar.start] for _ in range(grammar.batch_size)]
     logging.info('Constraining decoder to grammar')
     for i, inp in enumerate(decoder_inputs):
       reuse = (i > 0)
       with variable_scope.variable_scope(scope or "rnn_decoder", reuse=reuse):
-        new_nt = tf.reshape(next_or_nothing(stack), [grammar.batch_size, 1])
         if loop_function is not None and prev is not None:
           inp = loop_function(prev, i)
         output, state = cell(inp, state) 
-        new_mask = tf.gather_nd(grammar.mask, new_nt)
-        output = output * tf.cast(new_mask, tf.float32)
+        new_mask = tf.gather_nd(grammar.mask, current_nt)
+        output = output * new_mask
         outputs.append(output)
         prev = output
-
-        batch_choose = tf.expand_dims(tf.argmax(tf.nn.softmax(output), 1), 1) 
-        new_rules = tf.unstack(tf.cast(
-          tf.gather_nd(grammar.nt_map, batch_choose), tf.int32),
-                               grammar.batch_size)
-        
-        new_nt = [tf.dynamic_partition(grammar.nt_ids, new_rules[seq], 2) 
-                     for seq in range(grammar.batch_size)]
-        if i < grammar.stack_zeros:
-          for seq_id in range(grammar.batch_size):
-            stack[seq_id] = tf.concat(0, (new_nt[seq_id][1], 
-                                          tf.slice(stack[seq_id], [0], [-1]),
-                                          new_nt[seq_id][0]))
+        if loop_function is not None:
+          batch_choose = tf.expand_dims(tf.argmax(tf.nn.softmax(output), 1), 1)
         else:
-          for seq_id in range(grammar.batch_size):
-            stack[seq_id] = tf.concat(0, (new_nt[seq_id][1], 
-                                          tf.slice(stack[seq_id], [0], [-1])))
+          batch_choose = tf.expand_dims(raw_inp[i], 1)
+        new_rhs = tf.unstack(tf.gather_nd(grammar.rhs, batch_choose),
+                             grammar.batch_size)
+        trimmed_rhs = [tf.slice(r, [0], [tf.count_nonzero(r, dtype=tf.int32)])
+                       for r in new_rhs]
+        for seq_id in range(grammar.batch_size):
+          stack[seq_id] = tf.concat(0, (trimmed_rhs[seq_id], 
+                                        tf.slice(stack[seq_id], [1], [-1])))
+          current_nt[seq_id] = tf.slice(stack[seq_id], [0], [1])
   return outputs, state
 
 def rnn_decoder(decoder_inputs, initial_state, cell, loop_function=None,
@@ -418,7 +406,8 @@ def embedding_rnn_decoder(decoder_inputs,
   
     if grammar is not None:
       return rnn_grammar_decoder(emb_inp, initial_state, cell,
-                                 grammar=grammar, loop_function=loop_function)
+                                 grammar=grammar, raw_inp=decoder_inputs,
+                                 loop_function=loop_function)
     else:
       return rnn_decoder(emb_inp, initial_state, cell,
                          loop_function=loop_function,
@@ -540,7 +529,7 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
                                init_backward=False, hidden_state=None, 
                                initializer=None, legacy=False, 
                                feed_prev_p=None, bow_mask=None,
-                               bow_no_replace=False):
+                              bow_no_replace=False, grammar=None):
   with variable_scope.variable_scope(
       scope or "embedding_rnn_seq2seq", dtype=dtype) as scope:
     dtype = scope.dtype
@@ -592,7 +581,7 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
         decoder_inputs, initial_state, cell, num_symbols,
         embedding_size, output_projection=output_projection,
         feed_previous=feed_previous, feed_prev_p=feed_prev_p,
-        bow_mask=bow_mask, bow_no_replace=bow_no_replace)
+        bow_mask=bow_mask, bow_no_replace=bow_no_replace, grammar=grammar)
       return outputs, initial_state
 
     # If feed_previous is a Tensor, we construct 2 graphs and use cond.
@@ -606,7 +595,7 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
           embedding_size, output_projection=output_projection,
           feed_previous=feed_previous_bool,
           update_embedding_for_previous=False, feed_prev_p=feed_prev_p,
-          bow_mask=bow_mask, bow_no_replace=bow_no_replace)
+          bow_mask=bow_mask, bow_no_replace=bow_no_replace, grammar=grammar)
         return outputs + [initial_state]
 
     outputs_and_state = control_flow_ops.cond(feed_previous,
@@ -1604,7 +1593,7 @@ def sequence_loss(logits, targets, weights,
 def model_with_buckets_states(encoder_inputs, decoder_inputs, targets, weights,
                        buckets, seq2seq, softmax_loss_function=None,
                        per_example_loss=False, name=None, encoder_states=None,
-                       feed_prev_p=None):
+                              feed_prev_p=None, single_graph=False):
   if len(encoder_inputs) < buckets[-1][0]:
     raise ValueError("Length of encoder_inputs (%d) must be at least that of la"
                      "st bucket (%d)." % (len(encoder_inputs), buckets[-1][0]))
@@ -1618,6 +1607,8 @@ def model_with_buckets_states(encoder_inputs, decoder_inputs, targets, weights,
   losses = []
   outputs = []
   states = []
+  if single_graph:
+    buckets = [buckets[-1]]
   with ops.op_scope(all_inputs, name, "model_with_buckets"):
     for j, bucket in enumerate(buckets):
       with variable_scope.variable_scope(variable_scope.get_variable_scope(),
@@ -1685,5 +1676,6 @@ def model_with_buckets(encoder_inputs, decoder_inputs, targets, weights,
                                                  targets, weights, 
                                                  buckets, seq2seq, 
                                                  softmax_loss_function, 
-                                                 per_example_loss, name)
+                                                 per_example_loss, 
+                                                 name)
   return outputs, losses

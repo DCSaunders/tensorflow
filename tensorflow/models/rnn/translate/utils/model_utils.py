@@ -65,7 +65,7 @@ def process_args(FLAGS, train=True, greedy_decoder=False):
     logging.info("UNK_ID=%d" % data_utils.UNK_ID)
     logging.info("PAD_ID=%d" % data_utils.PAD_ID)
   
-  config['grammar'] = data_utils.prepare_grammar(config['seq2seq_mode'], config['grammar_def'], config['max_sequence_length'])
+  config['grammar'] = data_utils.prepare_grammar(config['grammar_def'], config['max_sequence_length'])
   return config
 
 def make_buckets(num_buckets, max_seq_len=50, add_src_eos=True, train=True, greedy_decoder=False):
@@ -177,7 +177,8 @@ def get_Seq2SeqModel(config, buckets, forward_only, rename_variable_prefix=None,
       sample_mean=config['sample_mean'],
       bow_no_replace=config['bow_no_replace'],
       grammar=config['grammar'],
-      mean_kl=config['mean_kl'])
+      mean_kl=config['mean_kl'],
+      single_graph=config['single_graph'])
 
 def get_singlestep_Seq2SeqModel(config, buckets):
   return tf_seq2seq.TFSeq2SeqEngine(

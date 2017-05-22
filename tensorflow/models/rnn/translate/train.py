@@ -106,6 +106,7 @@ tf.app.flags.DEFINE_float("learning_rate_decay_factor", 0.99, "Learning rate dec
 tf.app.flags.DEFINE_boolean("adjust_lr", False, "Adjust learning rate independent of performance.")
 tf.app.flags.DEFINE_float("max_gradient_norm", 1.0, "Clip gradients to this norm.")
 tf.app.flags.DEFINE_integer("batch_size", 80, "Batch size to use during training.")
+tf.app.flags.DEFINE_boolean("single_graph", False, "Use bucketing to select batches but a single graph to run the model.")
 
 # Mode
 tf.app.flags.DEFINE_string("seq2seq_mode", "nmt", "Mode to run seq2seq model: nmt, autoencoder, vae. nmt: Bahdanau system with attention. autoencoder: simple seq2seq encoder-decoder model. vae: recurrent variational autoencoder")

@@ -88,7 +88,8 @@ class Seq2SeqModel(object):
                seq2seq_mode="nmt",
                bow_no_replace=False,
                grammar=None,
-               mean_kl=False):
+               mean_kl=False,
+               single_graph=False):
     """Create the model.
 
     Args:
@@ -130,10 +131,13 @@ class Seq2SeqModel(object):
     self.word_keep_prob = word_keep_prob
     self.bow_no_replace = bow_no_replace
     self.anneal_scale = tf.placeholder(tf.float32, shape=[])
-    
-    if grammar is not None:
-      grammar.batch_size = self.batch_size
+    self.single_graph = single_graph
+    self.grammar = grammar
 
+    if grammar is not None:
+      max_decoder_size = self.buckets[-1][1]
+      self.grammar.batch_size = self.batch_size
+      self.grammar.stack_zeros = max_decoder_size
     # If we use sampled softmax, we need an output projection.
     output_projection = None
     softmax_loss_function = None
@@ -231,7 +235,8 @@ class Seq2SeqModel(object):
         seq2seq_args.update(num_symbols=source_vocab_size,
                             feed_prev_p=feed_prev_p,
                             hidden_state=encoder_state,
-                            bow_no_replace=bow_no_replace)
+                            bow_no_replace=bow_no_replace,
+                            grammar=self.grammar)
         if self.seq2seq_mode == 'vae':
           logging.info("Creating embedding rnn variational autoencoder")
           seq2seq_args.update(latent_size=latent_size,
@@ -241,8 +246,7 @@ class Seq2SeqModel(object):
                               sample_mean=sample_mean,
                               concat_encoded=concat_encoded,
                               dec_cell=dec_cell,
-                              mean_kl=mean_kl,
-                              grammar=grammar)
+                              mean_kl=mean_kl)
           return tf.nn.seq2seq.embedding_rnn_vae_seq2seq(**seq2seq_args)
         else:
           logging.info("Creating embedding rnn autoencoder")
@@ -266,6 +270,11 @@ class Seq2SeqModel(object):
     self.feed_prev_p = tf.placeholder(tf.float32, shape=[])
     self.target_weights = []
     self.targets = []
+    if self.grammar is not None:
+      self.grammar.mask = tf.placeholder(tf.float32, name='g_mask',
+                        shape=[self.grammar.n_nt, self.grammar.n_rules])
+      self.grammar.rhs = tf.placeholder(tf.int32, name='rhs_mask', 
+                        shape=[self.grammar.n_rules, self.grammar.max_nt_count])
       
     for i in xrange(buckets[-1][0]):  # Last bucket is the biggest one.
       self.encoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
@@ -313,6 +322,8 @@ class Seq2SeqModel(object):
                       seq2seq=lambda a, b, c, d, e: seq2seq_f(a, b, False, c, d, e),
                       softmax_loss_function=softmax_loss_function,
                       encoder_states=state, feed_prev_p=feed_prev)
+    if self.single_graph:
+      model_args.update(single_graph=self.single_graph)
     if forward_only:
       model_args.update(seq2seq=lambda a, b, c, d, e: seq2seq_f(a, b, True, c, d, e))
       self.outputs, self.losses, self.states = tf.nn.seq2seq.model_with_buckets_states(**model_args)
@@ -348,8 +359,9 @@ class Seq2SeqModel(object):
         epsilon = 1e-6
         opt = tf.train.AdadeltaOptimizer(rho=rho, epsilon=epsilon)        
 
-      for b in xrange(len(buckets)):
-        gradients = tf.gradients(self.losses[b], params)
+      #for b in xrange(len(buckets)):
+      for loss in self.losses:
+        gradients = tf.gradients(loss, params) #self.losses[b], params)
         clipped_gradients, norm = tf.clip_by_global_norm(gradients,
                                                          max_gradient_norm)
         self.gradient_norms.append(norm)
@@ -375,7 +387,7 @@ class Seq2SeqModel(object):
                           bucket_id, sequence_length, src_mask, bow_mask, forward_only,
                           hidden=None):
     # Check if the sizes match. Return tuple: input_feed, encoder_size, decoder_size
-    encoder_size, decoder_size = self.buckets[bucket_id]
+    encoder_size, decoder_size = self.buckets[-1] if self.single_graph else self.buckets[bucket_id]
 #    print("Enc size={} dec size={}".format(encoder_size, decoder_size))
     if len(encoder_inputs) != encoder_size:
       raise ValueError("Encoder length must be equal to the one in bucket,"
@@ -429,6 +441,9 @@ class Seq2SeqModel(object):
     if hidden is not None:
       logging.debug("Decoding from hidden layer")
       input_feed[self.encoder_states.name] = hidden
+    if self.grammar is not None:
+      input_feed[self.grammar.mask.name] = self.grammar.mask_feed
+      input_feed[self.grammar.rhs.name] = self.grammar.rhs_feed
     if self.seq2seq_mode == 'vae':
       anneal_scale = 1
       if self.annealing and not forward_only:
@@ -461,7 +476,8 @@ class Seq2SeqModel(object):
       encoder_inputs, decoder_inputs, target_weights, 
       bucket_id, sequence_length, src_mask, bow_mask,
       forward_only)
-
+    if self.single_graph:
+      bucket_id = -1
     # Output feed: depends on whether we do a backward step or not.
     if not forward_only:                
       # todo: step for this shouldn't really be hardcoded
@@ -511,7 +527,8 @@ class Seq2SeqModel(object):
       encoder_inputs, decoder_inputs, target_weights, 
       bucket_id, sequence_length, src_mask, bow_mask, 
       forward_only, hidden=hidden)
-    
+    if self.single_graph:
+      bucket_id = -1
     # Output feed: depends on whether we do a backward step or not.
     if not forward_only:    
       if self.seq2seq_mode == 'vae' and self.global_step.eval() % 200 == 0:
@@ -559,8 +576,8 @@ class Seq2SeqModel(object):
       train_idx = batch_ptr["offset"]
       idx_map = batch_ptr["idx_map"]
     
-    encoder_size, decoder_size = self.buckets[bucket_id]
     encoder_inputs, decoder_inputs = [], []
+    encoder_size, decoder_size = self.buckets[-1] if self.single_graph else self.buckets[bucket_id]
 
     # Get a random batch of encoder and decoder inputs from data,
     # pad them if needed, reverse encoder inputs and add GO to decoder.
