@@ -42,6 +42,7 @@ PAD_ID = 0
 GO_ID = 1
 EOS_ID = 2
 UNK_ID = 3
+UNK_T_ID = None
 
 # Regular expressions used to tokenize.
 _WORD_SPLIT = re.compile(b"([.,!?\"':;)(])")
@@ -59,7 +60,13 @@ def no_pad_symbol():
 
 def grammar_eos():
   global EOS_ID
+  global PAD_ID
+  global UNK_ID
+  global UNK_T_ID
   EOS_ID = 0
+  PAD_ID = 0
+  UNK_ID = 2
+  UNK_T_ID = 3
 
 def maybe_download(directory, filename, url):
   """Download filename from url unless it's already in directory."""
@@ -317,50 +324,107 @@ def get_training_data(config):
     return src_train, trg_train, src_dev, trg_dev
 
 class Grammar(object):
-  def __init__(self, mask_dict, rules, max_seq_len):
-    '''Args:
-      mask_dict: dictionary mapping non-terminal to list of rule indices where NT is the LHS
-      rules: list of RHS of each rule. Index here corresponds to input production rule index.
-    Attributes:
-      n_rules: number of rules (equivalent to vocab size)
+  def __init__(self, mask_dict, rules, max_seq_len, max_nt):
+    '''n_rules: number of rules (equivalent to vocab size)
       n_nt: number of unique non-terminals
       stack_zeros: number of iterations in which to add n_nt 
-      nt_ids: np range of length number of unique non-terminals
-      mask: binary numpy array. mask(i,j) = 1 if non-terminal i appears on the LHS of rule j
-      nt_map: binary numpy array. nt_map(i,j) = 1 if rule i has non-terminal j on its RHS
+      mask: binary numpy array. mask(i,j) = 1 if non-terminal i on LHS of rule j
+      start: start rule ID
+      rhs: padded numpy array containing indices of NTs on RHS of each rule
     '''
+    self.mask = None
+    self.rhs = None
     self.n_rules = len(rules)
-    self.n_nt = len(mask_dict)
-    self.stack_zeros = max_seq_len / self.n_nt 
-    self.mask = np.zeros((self.n_nt, self.n_rules))
-    self.nt_map = np.zeros((self.n_rules, self.n_nt))
-    self.nt_ids = np.arange(self.n_nt).astype(np.int32)
+    self.n_nt = max_nt + 1
+    self.start = rules[GO_ID][0]
+    self.stack_zeros = max_seq_len
+    self.mask_feed = np.zeros((self.n_nt, self.n_rules), dtype=np.float32)
     self.batch_size = 1 # reset by model
+    self.rhs_feed = []
     for nt, rule in mask_dict.items():
-      self.mask[nt, rule] = 1
-
-    for rule_id, rule in enumerate(rules):
+      self.mask_feed[nt, rule] = 1
+    self.mask_feed[UNK_ID:, UNK_ID] = self.mask_feed[UNK_ID, :] = 1
+    self.mask_feed[UNK_ID, GO_ID] = 0
+    self.max_nt_count = 0
+    for rule_idx, rule in enumerate(rules):
+      self.max_nt_count = max(self.max_nt_count, len(rule))
+      self.rhs_feed.append([])
       for idx in rule:
         if idx in mask_dict:
-          self.nt_map[rule_id, idx] = 1
-        
-def prepare_grammar(mode, grammar_path, max_seq_len):
+          self.rhs_feed[rule_idx].append(idx)
+    for rhs in self.rhs_feed:
+      pad_len = self.max_nt_count - len(rhs)
+      rhs.extend(pad_len * [PAD_ID])
+def prepare_grammar(grammar_path, max_seq_len):
   grammar = None
-  if mode == 'vae' and grammar_path is not None:
-    if gfile.Exists(grammar_path):
-      logging.info('Getting grammar from path {}'.format(grammar_path))
-      mask_dict = collections.defaultdict(list)
-      rules = []
-      with open(grammar_path, 'r') as f:
-        for idx, line in enumerate(f):
-          nt, rule = line.split(':')
-          # NB: this relies on non-terminals having the first indices
-          mask_dict[int(nt.strip())].append(idx)
-          rules.append(np.array(rule.strip().split()).astype(int))      
-      grammar = Grammar(mask_dict, rules, max_seq_len)
-      grammar_eos()
-    else:
-      raise ValueError("Grammar path not found: {}".format(grammar_path))
+  if grammar_path is not None:
+    logging.info('Getting grammar from path {}'.format(grammar_path))
+    mask_dict = collections.defaultdict(list)
+    rules = []
+    with open(grammar_path, 'r') as f:
+      for idx, line in enumerate(f):
+        nt, rule = line.split(':')
+        nt = int(nt.strip())
+        # NB: this relies on non-terminals having the first indices               
+        mask_dict[nt].append(idx)
+        rules.append(np.array(rule.strip().split()).astype(int))
+      grammar = Grammar(mask_dict, rules, max_seq_len, max_nt=nt)
+  else:
+    raise ValueError("Grammar path not found: {}".format(grammar_path))
+  return grammar
+
+
+
+class Grammar(object):
+  def __init__(self, mask_dict, rules, max_seq_len, max_nt):
+    '''n_rules: number of rules (equivalent to vocab size)                        
+      n_nt: number of unique non-terminals                                        
+      stack_zeros: number of iterations in which to add n_nt                      
+      mask: binary numpy array. mask(i,j) = 1 if non-terminal i on LHS of rule j  
+      start: start rule ID                                                        
+      rhs: padded numpy array containing indices of NTs on RHS of each rule       
+    '''
+    self.mask = None
+    self.rhs = None
+    self.n_rules = len(rules)
+    self.n_nt = max_nt + 1
+    self.start = rules[GO_ID][0]
+    self.stack_zeros = max_seq_len
+    self.mask_feed = np.zeros((self.n_nt, self.n_rules), dtype=np.float32)
+    self.batch_size = 1 # reset by model                                          
+    self.rhs_feed = []
+    for nt, rule in mask_dict.items():
+      self.mask_feed[nt, rule] = 1
+    self.mask_feed[UNK_ID:, UNK_ID] = self.mask_feed[UNK_ID, :] = 1
+    self.mask_feed[UNK_ID, GO_ID] = 0
+    self.max_nt_count = 0
+    for rule_idx, rule in enumerate(rules):
+      self.max_nt_count = max(self.max_nt_count, len(rule))
+      self.rhs_feed.append([])
+      for idx in rule:
+        if idx in mask_dict:
+          self.rhs_feed[rule_idx].append(idx)
+    for rhs in self.rhs_feed:
+      pad_len = self.max_nt_count - len(rhs)
+      rhs.extend(pad_len * [PAD_ID])
+        
+def prepare_grammar(grammar_path, max_seq_len):
+  grammar = None
+  if grammar_path is not None and gfile.Exists(grammar_path):
+    logging.info('Getting grammar from path {}'.format(grammar_path))
+    grammar_eos()
+    mask_dict = collections.defaultdict(list)
+    rules = []
+    with open(grammar_path, 'r') as f:
+      for idx, line in enumerate(f):
+        nt, rule = line.split(':')
+        nt = int(nt.strip())
+        # NB: this relies on non-terminals having the first indices
+        mask_dict[nt].append(idx)
+        rules.append(np.array(rule.strip().split()).astype(int))      
+      grammar = Grammar(mask_dict, rules, max_seq_len, max_nt=nt)
+  else:
+    raise ValueError("Grammar path not found: {}".format(grammar_path))
   return grammar
 
 def prepare_data(data_dir, src_vocabulary_size, trg_vocabulary_size,
