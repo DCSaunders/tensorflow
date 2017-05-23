@@ -344,7 +344,7 @@ class Grammar(object):
     for nt, rule in mask_dict.items():
       self.mask_feed[nt, rule] = 1
     self.mask_feed[UNK_ID:, UNK_ID] = self.mask_feed[UNK_ID, :] = 1
-    self.mask_feed[UNK_ID, GO_ID] = 0
+    self.mask_feed[UNK_ID, GO_ID] = self.mask_feed[GO_ID, GO_ID] = 0
     self.max_nt_count = 0
     for rule_idx, rule in enumerate(rules):
       self.max_nt_count = max(self.max_nt_count, len(rule))

@@ -170,11 +170,10 @@ def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_funct
         outputs.append(output)
         prev = output
         if loop_function is not None:
-          batch_choose = tf.expand_dims(tf.argmax(tf.nn.softmax(output), 1), 1)
+          batch_choose = tf.expand_dims(tf.argmax(output, 1), 1)
         else:
           batch_choose = tf.expand_dims(raw_inp[i], 1)
-        new_rhs = tf.unstack(tf.gather_nd(grammar.rhs, batch_choose),
-                             grammar.batch_size)
+        new_rhs = tf.unstack(tf.gather_nd(grammar.rhs, batch_choose), grammar.batch_size)
         trimmed_rhs = [tf.slice(r, [0], [tf.count_nonzero(r, dtype=tf.int32)])
                        for r in new_rhs]
         for seq_id in range(grammar.batch_size):
