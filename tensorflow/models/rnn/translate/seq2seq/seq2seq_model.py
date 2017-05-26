@@ -134,10 +134,6 @@ class Seq2SeqModel(object):
     self.single_graph = single_graph
     self.grammar = grammar
 
-    if grammar is not None:
-      max_decoder_size = self.buckets[-1][1]
-      self.grammar.batch_size = self.batch_size
-      self.grammar.stack_zeros = max_decoder_size
     # If we use sampled softmax, we need an output projection.
     output_projection = None
     softmax_loss_function = None
@@ -214,6 +210,7 @@ class Seq2SeqModel(object):
       else:
         scope = variable_prefix+"/embedding_attention_seq2seq"
       logging.info("Using variable scope {}".format(scope)) 
+      
 
     def seq2seq_f(encoder_inputs, decoder_inputs, do_decode, bucket_length, encoder_state=None,
                   feed_prev_p=None):
@@ -236,7 +233,7 @@ class Seq2SeqModel(object):
                             feed_prev_p=feed_prev_p,
                             hidden_state=encoder_state,
                             bow_no_replace=bow_no_replace,
-                            grammar=self.grammar)
+                            grammar_mask=self.grammar_mask)
         if self.seq2seq_mode == 'vae':
           logging.info("Creating embedding rnn variational autoencoder")
           seq2seq_args.update(latent_size=latent_size,
@@ -270,11 +267,7 @@ class Seq2SeqModel(object):
     self.feed_prev_p = tf.placeholder(tf.float32, shape=[])
     self.target_weights = []
     self.targets = []
-    if self.grammar is not None:
-      self.grammar.mask = tf.placeholder(tf.float32, name='g_mask',
-                        shape=[self.grammar.n_nt, self.grammar.n_rules])
-      self.grammar.rhs = tf.placeholder(tf.int32, name='rhs_mask', 
-                        shape=[self.grammar.n_rules, self.grammar.max_nt_count])
+    self.grammar_mask = []
       
     for i in xrange(buckets[-1][0]):  # Last bucket is the biggest one.
       self.encoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
@@ -286,7 +279,10 @@ class Seq2SeqModel(object):
                                                 name="weight{0}".format(i)))
       self.targets.append(tf.placeholder(tf.int32, shape=[None],
                                          name="target{0}".format(i)))
-    
+      if self.grammar is not None:
+        self.grammar_mask.append(tf.placeholder(tf.float32, shape=[None, None],
+                                                name='grammar{0}'.format(i)))
+
     if use_sequence_length is True:
       logging.info("Using sequence length for encoder")                          
       self.sequence_length = tf.placeholder(tf.int32, shape=[None], name="seq_len")
@@ -306,6 +302,7 @@ class Seq2SeqModel(object):
                                      name="bow_mask")
     else:
       self.bow_mask = None
+      
 
     # Training outputs and losses.
     def adjust_loss_vae():
@@ -384,8 +381,8 @@ class Seq2SeqModel(object):
                                          write_version=saver_pb2.SaverDef.V1)
 
   def get_step_input_feed(self, encoder_inputs, decoder_inputs, target_weights,
-                          bucket_id, sequence_length, src_mask, bow_mask, forward_only,
-                          hidden=None):
+                          bucket_id, sequence_length, src_mask, bow_mask, grammar_mask,
+                          forward_only, hidden=None):
     # Check if the sizes match. Return tuple: input_feed, encoder_size, decoder_size
     encoder_size, decoder_size = self.buckets[-1] if self.single_graph else self.buckets[bucket_id]
 #    print("Enc size={} dec size={}".format(encoder_size, decoder_size))
@@ -422,6 +419,9 @@ class Seq2SeqModel(object):
       input_feed[self.decoder_inputs[l].name] = word_dropout(decoder_inputs[l])
       if self.scheduled_sample and not forward_only:
         input_feed[self.feed_prev_p.name] = min(1.0, self.global_step.eval() / self.scheduled_sample_steps)
+      if self.grammar_mask:
+        input_feed[self.grammar_mask[l].name] = grammar_mask[l]
+
       input_feed[self.target_weights[l].name] = target_weights[l]
       if l < decoder_size - 1:
         input_feed[self.targets[l].name] = decoder_inputs[l + 1]
@@ -441,9 +441,6 @@ class Seq2SeqModel(object):
     if hidden is not None:
       logging.debug("Decoding from hidden layer")
       input_feed[self.encoder_states.name] = hidden
-    if self.grammar is not None:
-      input_feed[self.grammar.mask.name] = self.grammar.mask_feed
-      input_feed[self.grammar.rhs.name] = self.grammar.rhs_feed
     if self.seq2seq_mode == 'vae':
       anneal_scale = 1
       if self.annealing and not forward_only:
@@ -453,7 +450,7 @@ class Seq2SeqModel(object):
 
   def step(self, session, encoder_inputs, decoder_inputs, target_weights,
            bucket_id, forward_only, sequence_length=None, src_mask=None,
-           bow_mask=None):
+           bow_mask=None, grammar_mask=None):
     """Run a step of the model feeding the given inputs.
 
     Args:
@@ -474,7 +471,7 @@ class Seq2SeqModel(object):
     """
     input_feed, encoder_size, decoder_size = self.get_step_input_feed(
       encoder_inputs, decoder_inputs, target_weights, 
-      bucket_id, sequence_length, src_mask, bow_mask,
+      bucket_id, sequence_length, src_mask, bow_mask, grammar_mask,
       forward_only)
     if self.single_graph:
       bucket_id = -1
@@ -504,7 +501,8 @@ class Seq2SeqModel(object):
 
   def get_state_step(self, session, encoder_inputs, decoder_inputs,
                      target_weights, bucket_id, forward_only,
-                     sequence_length=None, src_mask=None, bow_mask=None, hidden=None):
+                     sequence_length=None, src_mask=None, bow_mask=None, grammar_mask=None,
+                     hidden=None):
     """Run a step of the model feeding the given inputs, returning state
     
     Args:
@@ -525,7 +523,7 @@ class Seq2SeqModel(object):
     """
     input_feed, encoder_size, decoder_size = self.get_step_input_feed(
       encoder_inputs, decoder_inputs, target_weights, 
-      bucket_id, sequence_length, src_mask, bow_mask, 
+      bucket_id, sequence_length, src_mask, bow_mask, grammar_mask,
       forward_only, hidden=hidden)
     if self.single_graph:
       bucket_id = -1
@@ -617,7 +615,7 @@ class Seq2SeqModel(object):
       bow_mask = np.zeros((self.batch_size, self.target_vocab_size), dtype=np.float32)
 
     # Batch encoder inputs are just re-indexed encoder_inputs.
-    for length_idx in xrange(encoder_size):                     
+    for length_idx in xrange(encoder_size):
       for batch_idx in xrange(self.batch_size):
         if encoder_inputs[batch_idx][length_idx] == data_utils.PAD_ID:
           if self.src_mask is not None:
@@ -638,9 +636,16 @@ class Seq2SeqModel(object):
       batch_encoder_inputs.append(
           np.array([encoder_inputs[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
-                      
+             
+    grammar_mask = None
+    if self.grammar_mask:
+      grammar_mask = []
+      stack = [self.grammar.start for _ in self.batch_size]
+
     # Batch decoder inputs are re-indexed decoder_inputs, we create weights.
     for length_idx in xrange(decoder_size):
+      grammar_mask.append(self.grammar.stack_step(stack, self.batch_size))
+
       # Create target_weights to be 0 for targets that are padding.
       batch_weight = np.ones(self.batch_size, dtype=np.float32)
       for batch_idx in xrange(self.batch_size):
@@ -658,7 +663,7 @@ class Seq2SeqModel(object):
       batch_decoder_inputs.append(
           np.array([decoder_inputs[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
-      
+
     # Make sequence length vector
     sequence_length = None
     if self.sequence_length is not None:
@@ -671,4 +676,4 @@ class Seq2SeqModel(object):
     if self.bow_mask is not None:
       logging.debug("BOW mask={} (sum={})".format(bow_mask, np.sum(bow_mask)))
 
-    return batch_encoder_inputs, batch_decoder_inputs, batch_weights_trg, sequence_length, src_mask, bow_mask
+    return batch_encoder_inputs, batch_decoder_inputs, batch_weights_trg, sequence_length, src_mask, bow_mask, grammar_mask

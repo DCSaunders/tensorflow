@@ -65,7 +65,7 @@ def process_args(FLAGS, train=True, greedy_decoder=False):
     logging.info("UNK_ID=%d" % data_utils.UNK_ID)
     logging.info("PAD_ID=%d" % data_utils.PAD_ID)
   
-  config['grammar'] = data_utils.prepare_grammar(config['grammar_def'], config['max_sequence_length'])
+  config['grammar'] = data_utils.prepare_grammar(config['grammar_def'])
   return config
 
 def make_buckets(num_buckets, max_seq_len=50, add_src_eos=True, train=True, greedy_decoder=False):

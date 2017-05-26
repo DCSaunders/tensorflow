@@ -190,7 +190,7 @@ def get_outputs(session, config, model, sentence, buckets=None, hidden=None):
   logging.info("Input: {}".format(token_ids))
 
   # Get a 1-element batch to feed the sentence to the model.
-  encoder_inputs, decoder_inputs, target_weights, sequence_length, src_mask, bow_mask = model.get_batch(
+  encoder_inputs, decoder_inputs, target_weights, sequence_length, src_mask, bow_mask, grammar_mask = model.get_batch(
     {bucket_id: [(token_ids, [])]}, bucket_id, config['encoder'])
   # Get output logits for the sentence.
   _, _, output_logits, hidden_states = model.get_state_step(
@@ -199,8 +199,11 @@ def get_outputs(session, config, model, sentence, buckets=None, hidden=None):
     target_weights, bucket_id, 
     forward_only=True,
     sequence_length=sequence_length,
-    src_mask=src_mask, bow_mask=bow_mask, hidden=hidden)
-
+    src_mask=src_mask, bow_mask=bow_mask,
+    grammar_mask=grammar_mask, hidden=hidden)
+  if grammar_mask is not None:
+    #stack non-terminal sampling using model.grammar
+    pass
   # This is a greedy decoder - outputs are just argmaxes of output_logits.
   outputs = [int(np.argmax(logit, axis=1)) for logit in output_logits]
   return outputs, hidden_states
