@@ -203,9 +203,16 @@ def get_outputs(session, config, model, sentence, buckets=None, hidden=None):
     grammar_mask=grammar_mask, hidden=hidden)
   if grammar_mask is not None:
     #stack non-terminal sampling using model.grammar
-    pass
-  # This is a greedy decoder - outputs are just argmaxes of output_logits.
-  outputs = [int(np.argmax(logit, axis=1)) for logit in output_logits]
+    stack = [[]]
+    outputs = [1]
+    for logit in output_logits:
+      # break if EOS?
+      mask = model.grammar.stack_step(stack, [outputs[-1]])
+      # This is a greedy decoder - outputs are just argmaxes of output_logits.
+      outputs.append(int(np.argmax(mask * logit, axis=1)))
+    outputs = outputs[1:]
+  else:
+    outputs = [int(np.argmax(logit, axis=1)) for logit in output_logits]
   return outputs, hidden_states
 
 def main(_):

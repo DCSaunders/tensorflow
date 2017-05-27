@@ -419,7 +419,7 @@ class Seq2SeqModel(object):
       input_feed[self.decoder_inputs[l].name] = word_dropout(decoder_inputs[l])
       if self.scheduled_sample and not forward_only:
         input_feed[self.feed_prev_p.name] = min(1.0, self.global_step.eval() / self.scheduled_sample_steps)
-      if self.grammar_mask:
+      if self.grammar_mask and not forward_only:
         input_feed[self.grammar_mask[l].name] = grammar_mask[l]
 
       input_feed[self.target_weights[l].name] = target_weights[l]
@@ -640,12 +640,11 @@ class Seq2SeqModel(object):
     grammar_mask = None
     if self.grammar_mask:
       grammar_mask = []
-      stack = [self.grammar.start for _ in self.batch_size]
+      stack = [[] for _ in range(self.batch_size)]
 
     # Batch decoder inputs are re-indexed decoder_inputs, we create weights.
     for length_idx in xrange(decoder_size):
-      grammar_mask.append(self.grammar.stack_step(stack, self.batch_size))
-
+      
       # Create target_weights to be 0 for targets that are padding.
       batch_weight = np.ones(self.batch_size, dtype=np.float32)
       for batch_idx in xrange(self.batch_size):
@@ -663,7 +662,9 @@ class Seq2SeqModel(object):
       batch_decoder_inputs.append(
           np.array([decoder_inputs[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
-
+      if batch_ptr is not None:
+        grammar_mask.append(
+          self.grammar.stack_step(stack, batch_decoder_inputs[-1]))
     # Make sequence length vector
     sequence_length = None
     if self.sequence_length is not None:

@@ -325,35 +325,38 @@ class Grammar(object):
   def __init__(self, mask_dict, rules, max_nt):
     '''n_rules: number of rules (equivalent to vocab size)                        
       n_nt: number of unique non-terminals                                        
-      stack_zeros: number of iterations in which to add n_nt                      
       mask: binary numpy array. mask(i,j) = 1 if non-terminal i on LHS of rule j  
-      start: start rule ID                                                        
+      start: start rule RHS                               
       rhs: padded numpy array containing indices of NTs on RHS of each rule       
     '''
     self.n_rules = len(rules)
     self.n_nt = max_nt + 1
-    self.start = rules[GO_ID][np.nonzero(rules[GO_ID])]
+    self.start = [int(r) for r in reversed(rules[GO_ID])] 
     self.nop = EOS_ID
     self.mask = np.zeros((self.n_nt, self.n_rules), dtype=np.float32)
-
+    self.batch_size = 1 # reset by model                                        
     self.rhs = []
     for nt, rule in mask_dict.items():
       self.mask[nt, rule] = 1
     self.mask[UNK_ID:, UNK_ID] = self.mask[UNK_ID, UNK_ID:] = 1 
     self.mask[:, GO_ID] = 0 # nothing should map to GO
-    self.max_nt_count = 0
     for rule_idx, rule in enumerate(rules):
-      self.max_nt_count = max(self.max_nt_count, len(rule))
-      self.rhs.append([])
-      for idx in rule:
-        if idx in mask_dict:
-          self.rhs[rule_idx].append(idx)
+      self.rhs.append([int(r) for r in reversed(rule) if int(r) in mask_dict])
+    
+  def pop_or_nothing(self, seq):
+    if len(seq) >= 1:
+      return seq.pop()
+    else:
+      return self.nop
 
-  def stack_step(self, stack, batch_size):
+  def stack_step(self, stack, true_inputs):
     # Given a stack of non-terminals for each sequence in a batch:
     # - return the rule mask corresponding to the rightmost non-terminals
-    # - update the stack
-    return np.ones((batch_size, self.n_rules), dtype=np.float32)
+    # - update the stack with the RHS of the correct rule
+    for idx, inp in enumerate(true_inputs):
+      stack[idx].extend(self.rhs[inp])
+    index = [self.pop_or_nothing(seq) for seq in stack]
+    return self.mask[index]
 
 def prepare_grammar(grammar_path):
   grammar = None
@@ -368,7 +371,7 @@ def prepare_grammar(grammar_path):
         nt = int(nt.strip())
         # NB: this relies on non-terminals having the first indices
         mask_dict[nt].append(idx)
-        rules.append(np.array(rule.strip().split()).astype(int))      
+        rules.append(rule.strip().split())      
       grammar = Grammar(mask_dict, rules, max_nt=nt)
   elif grammar_path is not None:
     raise ValueError("Grammar path not found: {}".format(grammar_path))
