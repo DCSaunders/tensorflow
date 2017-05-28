@@ -133,6 +133,9 @@ class Seq2SeqModel(object):
     self.anneal_scale = tf.placeholder(tf.float32, shape=[])
     self.single_graph = single_graph
     self.grammar = grammar
+    if self.grammar:
+      self.grammar.stack_nops = self.buckets[-1][1]
+      self.grammar.batch_size = self.batch_size
 
     # If we use sampled softmax, we need an output projection.
     output_projection = None
@@ -233,7 +236,7 @@ class Seq2SeqModel(object):
                             feed_prev_p=feed_prev_p,
                             hidden_state=encoder_state,
                             bow_no_replace=bow_no_replace,
-                            grammar_mask=self.grammar_mask)
+                            grammar=self.grammar)
         if self.seq2seq_mode == 'vae':
           logging.info("Creating embedding rnn variational autoencoder")
           seq2seq_args.update(latent_size=latent_size,
@@ -267,8 +270,12 @@ class Seq2SeqModel(object):
     self.feed_prev_p = tf.placeholder(tf.float32, shape=[])
     self.target_weights = []
     self.targets = []
-    self.grammar_mask = []
-      
+    self.grammar.grammar_mask = []
+    self.grammar.rhs_mask = tf.placeholder(
+      tf.int32, shape=[None, None], name='grammar_rhs')
+    if forward_only:
+      self.grammar.grammar_full_mask = tf.placeholder(
+        tf.float32, shape=[None, None], name='grammar_mask')
     for i in xrange(buckets[-1][0]):  # Last bucket is the biggest one.
       self.encoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
                                                 name="encoder{0}".format(i)))                                                      
@@ -280,7 +287,7 @@ class Seq2SeqModel(object):
       self.targets.append(tf.placeholder(tf.int32, shape=[None],
                                          name="target{0}".format(i)))
       if self.grammar is not None:
-        self.grammar_mask.append(tf.placeholder(tf.float32, shape=[None, None],
+        self.grammar.grammar_mask.append(tf.placeholder(tf.float32, shape=[None, None],
                                                 name='grammar{0}'.format(i)))
 
     if use_sequence_length is True:
@@ -419,8 +426,12 @@ class Seq2SeqModel(object):
       input_feed[self.decoder_inputs[l].name] = word_dropout(decoder_inputs[l])
       if self.scheduled_sample and not forward_only:
         input_feed[self.feed_prev_p.name] = min(1.0, self.global_step.eval() / self.scheduled_sample_steps)
-      if self.grammar_mask and not forward_only:
-        input_feed[self.grammar_mask[l].name] = grammar_mask[l]
+      if self.grammar.grammar_mask is not None:
+        input_feed[self.grammar.rhs_mask.name] = self.grammar.sampling_rhs
+        if not forward_only:
+          input_feed[self.grammar.grammar_mask[l].name] = grammar_mask[l]
+        else:
+          input_feed[self.grammar.grammar_full_mask.name] = self.grammar.mask
 
       input_feed[self.target_weights[l].name] = target_weights[l]
       if l < decoder_size - 1:
@@ -638,7 +649,7 @@ class Seq2SeqModel(object):
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
              
     grammar_mask = None
-    if self.grammar_mask:
+    if self.grammar.grammar_mask is not None:
       grammar_mask = []
       stack = [[] for _ in range(self.batch_size)]
 
@@ -662,9 +673,8 @@ class Seq2SeqModel(object):
       batch_decoder_inputs.append(
           np.array([decoder_inputs[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
-      if batch_ptr is not None:
-        grammar_mask.append(
-          self.grammar.stack_step(stack, batch_decoder_inputs[-1]))
+      grammar_mask.append(
+        self.grammar.stack_step(stack, batch_decoder_inputs[-1]))
     # Make sequence length vector
     sequence_length = None
     if self.sequence_length is not None:

@@ -118,15 +118,15 @@ def get_state_size(cell):
     return cell.state_size[0]+cell.state_size[1]
   else:
     return cell.state_size
-
-def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar_mask=None, loop_function=None, scope=None):
+'''
+def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar=None, loop_function=None, scope=None):
   """RNN decoder for the grammar autoencoder.
 
   Args:
     decoder_inputs: A list of 2D Tensors [batch_size x input_size].
     initial_state: 2D Tensor with shape [batch_size x cell.state_size].
     cell: rnn_cell.RNNCell defining the cell function and size.
-    grammar_mask: during training, logits are masked at each time-step 
+    grammar: during training, logits are masked at each time-step 
        according to the current non-terminal in the true sequence
     loop_function: If not None, this function will be applied to the i-th output
   in order to generate the i+1-st input, and decoder_inputs will be ignored,
@@ -159,10 +159,49 @@ def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar_mask=None, 
           inp = loop_function(prev, i)
         output, state = cell(inp, state)
         if loop_function is None:
-          new_mask = grammar_mask[i]
+          new_mask = grammar.grammar_mask[i]
           output = output * new_mask
         outputs.append(output)
         prev = output
+  return outputs, state
+'''
+def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_function, scope=None):
+  with variable_scope.variable_scope(scope or "rnn_decoder"):
+    state = initial_state
+    prev = None
+    outputs = []
+    logging.info('Constraining decoder to grammar')
+    if loop_function is not None:
+      stack = [tf.concat(0, 
+                  (grammar.start,
+                   grammar.nop * tf.ones([grammar.stack_nops], dtype=tf.int32)))
+               for _ in range(grammar.batch_size)]  
+      logging.info('Initialising sampling-only stack')
+    for i, inp in enumerate(decoder_inputs):
+      reuse = (i > 0)
+      with variable_scope.variable_scope(scope or "rnn_decoder", reuse=reuse):
+        if loop_function is not None:
+          current_nt = [tf.slice(stack[seq_id], [0], [1]) 
+                        for seq_id in range(grammar.batch_size)]
+          if prev is not None:
+            inp = loop_function(prev, i)
+        output, state = cell(inp, state) 
+        if loop_function is not None:
+          new_mask = tf.gather_nd(grammar.grammar_full_mask, current_nt)
+        else:
+          new_mask = grammar.grammar_mask[i]
+        output = output * new_mask
+        outputs.append(output)
+        prev = output
+        if loop_function is not None:
+          batch_choose = tf.expand_dims(tf.argmax(output, 1), 1)
+          new_rhs = tf.unstack(tf.gather_nd(grammar.rhs_mask, batch_choose),
+                               grammar.batch_size)
+          trimmed_rhs = [tf.slice(r, [0], [tf.count_nonzero(r, dtype=tf.int32)])
+                         for r in new_rhs]
+          for seq_id in range(grammar.batch_size):
+            stack[seq_id] = tf.concat(0, (trimmed_rhs[seq_id], 
+                                          tf.slice(stack[seq_id], [1], [-1])))
   return outputs, state
 
 def rnn_decoder(decoder_inputs, initial_state, cell, loop_function=None,
@@ -325,7 +364,7 @@ def embedding_rnn_decoder(decoder_inputs,
                           bow_mask=None,
                           bow_no_replace=False,
                           feed_prev_p=None,
-                          grammar_mask=None):
+                          grammar=None):
   """RNN decoder with embedding and a pure-decoding option.
 
   Args:
@@ -386,10 +425,15 @@ def embedding_rnn_decoder(decoder_inputs,
     emb_inp = (
         embedding_ops.embedding_lookup(embedding, i) for i in decoder_inputs)
   
-    if grammar_mask is not None:
-      return rnn_grammar_decoder(emb_inp, initial_state, cell,
-                                 grammar_mask=grammar_mask,
-                                 loop_function=loop_function)
+    if grammar is not None:
+      #if loop_function is None:
+      return rnn_grammar_decoder(emb_inp, initial_state, 
+                                   cell, grammar=grammar,
+                                   loop_function=loop_function)
+      #else:
+      #  return rnn_grammar_decoder_sampling(emb_inp, initial_state,
+      #                                      cell, grammar=grammar,
+      #                                      loop_function=loop_function)
     else:
       return rnn_decoder(emb_inp, initial_state, cell,
                          loop_function=loop_function,
@@ -512,7 +556,7 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
                                initializer=None, legacy=False, 
                                feed_prev_p=None, bow_mask=None,
                               bow_no_replace=False,
-                              grammar_mask=None):
+                              grammar=None):
   with variable_scope.variable_scope(
       scope or "embedding_rnn_seq2seq", dtype=dtype) as scope:
     dtype = scope.dtype
@@ -565,7 +609,7 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
         embedding_size, output_projection=output_projection,
         feed_previous=feed_previous, feed_prev_p=feed_prev_p,
         bow_mask=bow_mask, bow_no_replace=bow_no_replace,
-        grammar_mask=grammar_mask)
+        grammar=grammar)
       return outputs, initial_state
 
     # If feed_previous is a Tensor, we construct 2 graphs and use cond.
@@ -580,7 +624,7 @@ def embedding_rnn_autoencoder_seq2seq(encoder_inputs, decoder_inputs, cell,
           feed_previous=feed_previous_bool,
           update_embedding_for_previous=False, feed_prev_p=feed_prev_p,
           bow_mask=bow_mask, bow_no_replace=bow_no_replace,
-          grammar_mask=grammar_mask)
+          grammar=grammar)
         return outputs + [initial_state]
 
     outputs_and_state = control_flow_ops.cond(feed_previous,
@@ -601,7 +645,7 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
                               anneal_scale=None, sample_mean=False,
                               dec_cell=None, concat_encoded=False,
                               bow_mask=None, bow_no_replace=False,
-                              mean_kl=False, grammar_mask=None):
+                              mean_kl=False, grammar=None):
   with variable_scope.variable_scope(
     scope or "embedding_rnn_seq2seq", dtype=dtype) as scope:
     dtype = scope.dtype
@@ -695,7 +739,7 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
         embedding_size, output_projection=output_projection,
         feed_previous=feed_previous, feed_prev_p=feed_prev_p,
         bow_mask=bow_mask, bow_no_replace=bow_no_replace,
-        grammar_mask=grammar_mask)
+        grammar=grammar)
       return outputs, encoder_out_state, kl_obj
 
     # If feed_previous is a Tensor, we construct 2 graphs and use cond.
@@ -709,7 +753,7 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
           feed_previous=feed_previous_bool,
           update_embedding_for_previous=False, feed_prev_p=feed_prev_p,
           bow_mask=bow_mask, bow_no_replace=bow_no_replace,
-          grammar_mask=grammar_mask)
+          grammar=grammar)
         return outputs + [encoder_out_state]
 
     outputs_and_state = control_flow_ops.cond(feed_previous,

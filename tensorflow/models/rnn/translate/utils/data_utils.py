@@ -331,18 +331,30 @@ class Grammar(object):
     '''
     self.n_rules = len(rules)
     self.n_nt = max_nt + 1
-    self.start = [int(r) for r in reversed(rules[GO_ID])] 
+    self.start = [int(r) for r in rules[GO_ID]] 
     self.nop = EOS_ID
+    self.stack_nops = 1
+    self.batch_size = 1
+    self.grammar_mask = None
+    self.rhs_mask = None
     self.mask = np.zeros((self.n_nt, self.n_rules), dtype=np.float32)
     self.batch_size = 1 # reset by model                                        
     self.rhs = []
+    self.sampling_rhs = []
     for nt, rule in mask_dict.items():
       self.mask[nt, rule] = 1
     self.mask[UNK_ID:, UNK_ID] = self.mask[UNK_ID, UNK_ID:] = 1 
     self.mask[:, GO_ID] = 0 # nothing should map to GO
+    max_nt_count = 0
     for rule_idx, rule in enumerate(rules):
       self.rhs.append([int(r) for r in reversed(rule) if int(r) in mask_dict])
-    
+      max_nt_count = max(max_nt_count, len(rule))
+      self.sampling_rhs.append([int(r) for r in rule if int(r) in mask_dict])
+    for rhs in self.sampling_rhs:
+      pad_len = max_nt_count - len(rhs)
+      rhs.extend(pad_len * [PAD_ID])    
+
+
   def pop_or_nothing(self, seq):
     if len(seq) >= 1:
       return seq.pop()

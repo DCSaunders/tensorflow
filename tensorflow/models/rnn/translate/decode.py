@@ -201,8 +201,10 @@ def get_outputs(session, config, model, sentence, buckets=None, hidden=None):
     sequence_length=sequence_length,
     src_mask=src_mask, bow_mask=bow_mask,
     grammar_mask=grammar_mask, hidden=hidden)
+  '''
   if grammar_mask is not None:
     #stack non-terminal sampling using model.grammar
+    
     stack = [[]]
     outputs = [1]
     for logit in output_logits:
@@ -212,7 +214,12 @@ def get_outputs(session, config, model, sentence, buckets=None, hidden=None):
       outputs.append(int(np.argmax(mask * logit, axis=1)))
     outputs = outputs[1:]
   else:
-    outputs = [int(np.argmax(logit, axis=1)) for logit in output_logits]
+  '''
+  outputs = []
+  for logit in output_logits:
+    outputs.append(int(np.argmax(logit, axis=1)))
+    if outputs[-1] == data_utils.EOS_ID:
+      break
   return outputs, hidden_states
 
 def main(_):
