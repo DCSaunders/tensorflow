@@ -223,14 +223,13 @@ def train(config):
 
       # Make a step on a random sequential batch (processing one batch is a global step)
       start_time = time.time()
-      encoder_inputs, decoder_inputs, target_weights, sequence_length, src_mask, bow_mask, grammar_mask = model.get_batch(
+      encoder_inputs, decoder_inputs, target_weights, sequence_length, src_mask, trg_mask = model.get_batch(
         train_set, bucket_id, config['encoder'], batch_ptr=batch_ptr if config['train_sequential'] else None,
         bookk=bookk if config['debug'] else None)
 
       _, step_loss, _ = model.step(session, encoder_inputs, decoder_inputs,
                                    target_weights, bucket_id, False,
-                                   sequence_length, src_mask, bow_mask,
-                                   grammar_mask)
+                                   sequence_length, src_mask, trg_mask)
 
       step_time += (time.time() - start_time) / config['steps_per_checkpoint']
       loss += step_loss / config['steps_per_checkpoint']

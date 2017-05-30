@@ -270,12 +270,13 @@ class Seq2SeqModel(object):
     self.feed_prev_p = tf.placeholder(tf.float32, shape=[])
     self.target_weights = []
     self.targets = []
-    self.grammar.grammar_mask = []
-    self.grammar.rhs_mask = tf.placeholder(
-      tf.int32, shape=[None, None], name='grammar_rhs')
-    if forward_only:
-      self.grammar.grammar_full_mask = tf.placeholder(
-        tf.float32, shape=[None, None], name='grammar_mask')
+    if self.grammar:
+      self.grammar.grammar_mask = []
+      self.grammar.rhs_mask = tf.placeholder(
+        tf.int32, shape=[None, None], name='grammar_rhs')
+      if forward_only:
+        self.grammar.grammar_full_mask = tf.placeholder(
+          tf.float32, shape=[None, None], name='grammar_mask')
     for i in xrange(buckets[-1][0]):  # Last bucket is the biggest one.
       self.encoder_inputs.append(tf.placeholder(tf.int32, shape=[None],
                                                 name="encoder{0}".format(i)))                                                      
@@ -388,7 +389,7 @@ class Seq2SeqModel(object):
                                          write_version=saver_pb2.SaverDef.V1)
 
   def get_step_input_feed(self, encoder_inputs, decoder_inputs, target_weights,
-                          bucket_id, sequence_length, src_mask, bow_mask, grammar_mask,
+                          bucket_id, sequence_length, src_mask, trg_mask,
                           forward_only, hidden=None):
     # Check if the sizes match. Return tuple: input_feed, encoder_size, decoder_size
     encoder_size, decoder_size = self.buckets[-1] if self.single_graph else self.buckets[bucket_id]
@@ -426,10 +427,10 @@ class Seq2SeqModel(object):
       input_feed[self.decoder_inputs[l].name] = word_dropout(decoder_inputs[l])
       if self.scheduled_sample and not forward_only:
         input_feed[self.feed_prev_p.name] = min(1.0, self.global_step.eval() / self.scheduled_sample_steps)
-      if self.grammar.grammar_mask is not None:
+      if self.grammar is not None:
         input_feed[self.grammar.rhs_mask.name] = self.grammar.sampling_rhs
         if not forward_only:
-          input_feed[self.grammar.grammar_mask[l].name] = grammar_mask[l]
+          input_feed[self.grammar.grammar_mask[l].name] = trg_mask[l]
         else:
           input_feed[self.grammar.grammar_full_mask.name] = self.grammar.mask
 
@@ -446,9 +447,9 @@ class Seq2SeqModel(object):
     if src_mask is not None:
       logging.debug("Using source mask for decoder: feed")
       input_feed[self.src_mask.name] = src_mask
-    if bow_mask is not None:
+    if self.bow_mask is not None:
       logging.debug("Using bow mask for decoder: feed")
-      input_feed[self.bow_mask.name] = bow_mask
+      input_feed[self.bow_mask.name] = trg_mask
     if hidden is not None:
       logging.debug("Decoding from hidden layer")
       input_feed[self.encoder_states.name] = hidden
@@ -461,7 +462,7 @@ class Seq2SeqModel(object):
 
   def step(self, session, encoder_inputs, decoder_inputs, target_weights,
            bucket_id, forward_only, sequence_length=None, src_mask=None,
-           bow_mask=None, grammar_mask=None):
+           trg_mask=None):
     """Run a step of the model feeding the given inputs.
 
     Args:
@@ -482,7 +483,7 @@ class Seq2SeqModel(object):
     """
     input_feed, encoder_size, decoder_size = self.get_step_input_feed(
       encoder_inputs, decoder_inputs, target_weights, 
-      bucket_id, sequence_length, src_mask, bow_mask, grammar_mask,
+      bucket_id, sequence_length, src_mask, trg_mask,
       forward_only)
     if self.single_graph:
       bucket_id = -1
@@ -512,7 +513,7 @@ class Seq2SeqModel(object):
 
   def get_state_step(self, session, encoder_inputs, decoder_inputs,
                      target_weights, bucket_id, forward_only,
-                     sequence_length=None, src_mask=None, bow_mask=None, grammar_mask=None,
+                     sequence_length=None, src_mask=None, trg_mask=None,
                      hidden=None):
     """Run a step of the model feeding the given inputs, returning state
     
@@ -534,7 +535,7 @@ class Seq2SeqModel(object):
     """
     input_feed, encoder_size, decoder_size = self.get_step_input_feed(
       encoder_inputs, decoder_inputs, target_weights, 
-      bucket_id, sequence_length, src_mask, bow_mask, grammar_mask,
+      bucket_id, sequence_length, src_mask, trg_mask,
       forward_only, hidden=hidden)
     if self.single_graph:
       bucket_id = -1
@@ -649,7 +650,7 @@ class Seq2SeqModel(object):
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
              
     grammar_mask = None
-    if self.grammar.grammar_mask is not None:
+    if self.grammar:
       grammar_mask = []
       stack = [[] for _ in range(self.batch_size)]
 
@@ -673,8 +674,9 @@ class Seq2SeqModel(object):
       batch_decoder_inputs.append(
           np.array([decoder_inputs[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
-      grammar_mask.append(
-        self.grammar.stack_step(stack, batch_decoder_inputs[-1]))
+      if self.grammar is not None:
+        grammar_mask.append(
+          self.grammar.stack_step(stack, batch_decoder_inputs[-1]))
     # Make sequence length vector
     sequence_length = None
     if self.sequence_length is not None:
@@ -686,5 +688,11 @@ class Seq2SeqModel(object):
     logging.debug("Source mask={}".format(src_mask))
     if self.bow_mask is not None:
       logging.debug("BOW mask={} (sum={})".format(bow_mask, np.sum(bow_mask)))
+      
+    trg_mask = None
+    if self.bow_mask is not None:
+      trg_mask = bow_mask
+    elif self.grammar is not None:
+      trg_mask = grammar_mask
 
-    return batch_encoder_inputs, batch_decoder_inputs, batch_weights_trg, sequence_length, src_mask, bow_mask, grammar_mask
+    return batch_encoder_inputs, batch_decoder_inputs, batch_weights_trg, sequence_length, src_mask, trg_mask
