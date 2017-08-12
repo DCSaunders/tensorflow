@@ -58,26 +58,32 @@ def process_args(FLAGS, train=True, greedy_decoder=False):
   if config['num_symm_buckets'] > 0:
     global _buckets
     _buckets = make_buckets(config['num_symm_buckets'], config['max_sequence_length'],
-                            config['add_src_eos'], train, greedy_decoder)
+                            config['add_src_eos'], train, greedy_decoder, max_trg_len=config['max_target_length'])
   
   if config['no_pad_symbol']:
     data_utils.no_pad_symbol()
     logging.info("UNK_ID=%d" % data_utils.UNK_ID)
     logging.info("PAD_ID=%d" % data_utils.PAD_ID)
   
-  config['grammar'] = data_utils.prepare_grammar(config['grammar_def'])
+  config['grammar'] = data_utils.prepare_grammar(
+    config['grammar_def'], config['use_trg_grammar_mask'])
   return config
 
-def make_buckets(num_buckets, max_seq_len=50, add_src_eos=True, train=True, greedy_decoder=False):
+def make_buckets(num_buckets, max_seq_len=50, add_src_eos=True, train=True, greedy_decoder=False, max_trg_len=0):
   # Bucket length: +1 for EOS, +1 for GO symbol
   src_offset = 0 if not add_src_eos else 1
+  trg_offset = 2
+  if greedy_decoder and not train:
+    trg_offset = 5
+  if max_trg_len and max_trg_len > max_seq_len:
+    trg_offset += max_trg_len - max_seq_len
   if train:
     # Buckets for training
-    buckets = [ (int(max_seq_len/num_buckets)*i + src_offset, int(max_seq_len/num_buckets)*i + 2) for i in range(1,num_buckets+1) ]
+    buckets = [ (int(max_seq_len/num_buckets)*i + src_offset, int(max_seq_len/num_buckets)*i + trg_offset) for i in range(1,num_buckets+1) ]
   else:
     if greedy_decoder:
       # Buckets for decoding with training graph (greedy decoder)
-      buckets = [ (int(max_seq_len/num_buckets)*i + src_offset, int(max_seq_len/num_buckets)*i + 5) for i in range(1,num_buckets+1) ]
+      buckets = [ (int(max_seq_len/num_buckets)*i + src_offset, int(max_seq_len/num_buckets)*i + trg_offset) for i in range(1,num_buckets+1) ]
     else:
       # Buckets for decoding with single-step decoding graph: input length=1 on the target side)
       buckets = [ (int(max_seq_len/num_buckets)*i + src_offset, 1) for i in range(1,num_buckets+1) ]
@@ -85,10 +91,13 @@ def make_buckets(num_buckets, max_seq_len=50, add_src_eos=True, train=True, gree
   logging.info("Use buckets={}".format(buckets))
   return buckets
 
-def make_bucket(src_length, greedy_decoder=False):
+def make_bucket(src_length, greedy_decoder=False, max_trg_len=0):
+  trg_offset = 5
+  if max_trg_len and max_trg_len > src_length:
+    trg_offset += max_trg_len - src_length
   if greedy_decoder:
     # Additional bucket for decoding with training graph
-    return (src_length, src_length + 5)
+    return (src_length, src_length + trg_offset)
   else:
     # Additional bucket for decoding with single-step decoding graph: input length=1 on the target side)
     return (src_length, 1)
@@ -132,7 +141,7 @@ def create_model(session, config, forward_only, rename_variable_prefix=None, buc
 
 def load_model(session, config):
   """Load translation model with single-step graph for decoding"""
-  buckets = make_buckets(config['num_symm_buckets'], config['max_sequence_length'], config['add_src_eos'], train=False)
+  buckets = make_buckets(config['num_symm_buckets'], config['max_sequence_length'], config['add_src_eos'], train=False, max_trg_len=config['max_target_length'])
   model = get_singlestep_Seq2SeqModel(config, buckets)
   training_graph = model.create_training_graph() # Needed for loading variables
   encoding_graph = model.create_encoding_graph()

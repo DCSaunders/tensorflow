@@ -118,91 +118,55 @@ def get_state_size(cell):
     return cell.state_size[0]+cell.state_size[1]
   else:
     return cell.state_size
-'''
-def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar=None, loop_function=None, scope=None):
-  """RNN decoder for the grammar autoencoder.
 
-  Args:
-    decoder_inputs: A list of 2D Tensors [batch_size x input_size].
-    initial_state: 2D Tensor with shape [batch_size x cell.state_size].
-    cell: rnn_cell.RNNCell defining the cell function and size.
-    grammar: during training, logits are masked at each time-step 
-       according to the current non-terminal in the true sequence
-    loop_function: If not None, this function will be applied to the i-th output
-  in order to generate the i+1-st input, and decoder_inputs will be ignored,
-      except for the first element ("GO" symbol). This can be used for decoding,
-      but also for training to emulate http://arxiv.org/abs/1506.03099.
-      Signature -- loop_function(prev, i) = next
-        * prev is a 2D Tensor of shape [batch_size x output_size],
-        * i is an integer, the step number (when advanced control is needed),
-        * next is a 2D Tensor of shape [batch_size x input_size].
-    scope: VariableScope for the created subgraph; defaults to "rnn_decoder".
-
-  Returns:
-    A tuple of the form (outputs, state), where:
-      outputs: A list of the same length as decoder_inputs of 2D Tensors with
-        shape [batch_size x output_size] containing generated outputs.
-      state: The state of each cell at the final time-step.
-        It is a 2D Tensor of shape [batch_size x cell.state_size].
-        (Note that in some cases, like basic RNN cell or GRU cell, outputs and
-         states can be the same. They are different for LSTM cells though.)
-  """
-  with variable_scope.variable_scope(scope or "rnn_decoder"):
-    state = initial_state
-    prev = None
-    outputs = []
-    logging.info('Constraining decoder to grammar')
-    for i, inp in enumerate(decoder_inputs):
-      reuse = (i > 0)
-      with variable_scope.variable_scope(scope or "rnn_decoder", reuse=reuse):
-        if loop_function is not None and prev is not None:
-          inp = loop_function(prev, i)
-        output, state = cell(inp, state)
-        if loop_function is None:
-          new_mask = grammar.grammar_mask[i]
-          output = output * new_mask
-        outputs.append(output)
-        prev = output
-  return outputs, state
-'''
 def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_function, scope=None):
   with variable_scope.variable_scope(scope or "rnn_decoder"):
     state = initial_state
     prev = None
     outputs = []
     logging.info('Constraining decoder to grammar')
-    if loop_function is not None:
+    stack = None
+    if loop_function is not None and grammar.use_trg_mask:
       stack = [tf.concat(0, 
                   (grammar.start,
                    grammar.nop * tf.ones([grammar.stack_nops], dtype=tf.int32)))
                for _ in range(grammar.batch_size)]  
       logging.info('Initialising sampling-only stack')
+
     for i, inp in enumerate(decoder_inputs):
       reuse = (i > 0)
       with variable_scope.variable_scope(scope or "rnn_decoder", reuse=reuse):
-        if loop_function is not None:
-          current_nt = [tf.slice(stack[seq_id], [0], [1]) 
-                        for seq_id in range(grammar.batch_size)]
+        if loop_function is not None: 
           if prev is not None:
             inp = loop_function(prev, i)
-        output, state = cell(inp, state) 
-        if loop_function is not None:
-          new_mask = tf.gather_nd(grammar.grammar_full_mask, current_nt)
-        else:
-          new_mask = grammar.grammar_mask[i]
-        output = output * new_mask
+        output, state = cell(inp, state)
+        output = apply_grammar(output, i, stack, loop_function, grammar,
+                               scope=variable_scope.get_variable_scope())
         outputs.append(output)
         prev = output
-        if loop_function is not None:
-          batch_choose = tf.expand_dims(tf.argmax(output, 1), 1)
-          new_rhs = tf.unstack(tf.gather_nd(grammar.rhs_mask, batch_choose),
-                               grammar.batch_size)
-          trimmed_rhs = [tf.slice(r, [0], [tf.count_nonzero(r, dtype=tf.int32)])
-                         for r in new_rhs]
-          for seq_id in range(grammar.batch_size):
-            stack[seq_id] = tf.concat(0, (trimmed_rhs[seq_id], 
-                                          tf.slice(stack[seq_id], [1], [-1])))
   return outputs, state
+
+def apply_grammar(output, output_idx, stack, loop_function, grammar, scope=None):
+  reuse = (output_idx > 0)
+  with variable_scope.variable_scope(scope or "grammar", reuse=reuse):
+    if loop_function is not None and grammar.use_trg_mask:
+      current_nt = [tf.slice(stack[seq_id], [0], [1]) 
+                    for seq_id in range(grammar.batch_size)]
+      new_mask = tf.gather_nd(grammar.grammar_full_mask, current_nt)
+    else:
+      new_mask = grammar.grammar_mask[output_idx]
+    output = output * new_mask
+
+    if loop_function is not None and grammar.use_trg_mask:
+      batch_choose = tf.expand_dims(tf.argmax(output, 1), 1)
+      new_rhs = tf.unstack(tf.gather_nd(grammar.rhs_mask, batch_choose),
+                           grammar.batch_size)
+      trimmed_rhs = [tf.slice(r, [0], [tf.count_nonzero(r, dtype=tf.int32)])
+                     for r in new_rhs]
+      for seq_id in range(grammar.batch_size):
+        stack[seq_id] = tf.concat(0, (trimmed_rhs[seq_id], 
+                        tf.slice(stack[seq_id], [1], [-1])))
+    return output
 
 def rnn_decoder(decoder_inputs, initial_state, cell, loop_function=None,
                 scope=None, feed_prev_p=None, bow_mask=None,
@@ -426,14 +390,9 @@ def embedding_rnn_decoder(decoder_inputs,
         embedding_ops.embedding_lookup(embedding, i) for i in decoder_inputs)
   
     if grammar is not None:
-      #if loop_function is None:
       return rnn_grammar_decoder(emb_inp, initial_state, 
-                                   cell, grammar=grammar,
+                                   cell, grammar=grammar, 
                                    loop_function=loop_function)
-      #else:
-      #  return rnn_grammar_decoder_sampling(emb_inp, initial_state,
-      #                                      cell, grammar=grammar,
-      #                                      loop_function=loop_function)
     else:
       return rnn_decoder(emb_inp, initial_state, cell,
                          loop_function=loop_function,
@@ -649,39 +608,34 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
   with variable_scope.variable_scope(
     scope or "embedding_rnn_seq2seq", dtype=dtype) as scope:
     dtype = scope.dtype
-    if hidden_state is None:
-      if encoder == "bidirectional":
-        encoder_cell_fw = rnn_cell.EmbeddingWrapper(
-          cell.get_fw_cell(), embedding_classes=num_symbols,
-          embedding_size=embedding_size, initializer=initializer)
-        encoder_cell_bw = rnn_cell.EmbeddingWrapper(
-          cell.get_bw_cell(), embedding_classes=num_symbols,
-          embedding_size=embedding_size, initializer=initializer)
-        _, encoder_state, encoder_state_bw = rnn.bidirectional_rnn(encoder_cell_fw, encoder_cell_bw,
-                                                      encoder_inputs, dtype=dtype,
-                                                      sequence_length=sequence_length,
-                                                      bucket_length=bucket_length,
-                                                      legacy=legacy)
-        if init_backward:
-          encoder_out_state = encoder_state_bw
-          enc_cell = encoder_cell_bw
-          dec_cell =  dec_cell.get_bw_cell()
-        else:
-          encoder_out_state = encoder_state
-          enc_cell = encoder_cell_fw
-          dec_cell = dec_cell.get_fw_cell()
-      elif encoder == "reverse":
-        enc_cell = rnn_cell.EmbeddingWrapper(
-          cell, embedding_classes=num_symbols,
-          embedding_size=embedding_size, initializer=initializer)
-        _, encoder_out_state = rnn.rnn(
-          enc_cell, encoder_inputs, dtype=dtype,
-          sequence_length=sequence_length, bucket_length=bucket_length,
-          reverse=True)    
-    else:
-      encoder_out_state = hidden_state
-      feed_prev_p = None
-
+    if encoder == "bidirectional":
+      encoder_cell_fw = rnn_cell.EmbeddingWrapper(
+        cell.get_fw_cell(), embedding_classes=num_symbols,
+        embedding_size=embedding_size, initializer=initializer)
+      encoder_cell_bw = rnn_cell.EmbeddingWrapper(
+        cell.get_bw_cell(), embedding_classes=num_symbols,
+        embedding_size=embedding_size, initializer=initializer)
+      _, encoder_state, encoder_state_bw = rnn.bidirectional_rnn(encoder_cell_fw, encoder_cell_bw,
+                                                    encoder_inputs, dtype=dtype,
+                                                    sequence_length=sequence_length,
+                                                    bucket_length=bucket_length,
+                                                    legacy=legacy)
+      if init_backward:
+        encoder_out_state = encoder_state_bw
+        enc_cell = encoder_cell_bw
+        dec_cell =  dec_cell.get_bw_cell()
+      else:
+        encoder_out_state = encoder_state
+        enc_cell = encoder_cell_fw
+        dec_cell = dec_cell.get_fw_cell()
+    elif encoder == "reverse":
+      enc_cell = rnn_cell.EmbeddingWrapper(
+        cell, embedding_classes=num_symbols,
+        embedding_size=embedding_size, initializer=initializer)
+      _, encoder_out_state = rnn.rnn(
+        enc_cell, encoder_inputs, dtype=dtype,
+        sequence_length=sequence_length, bucket_length=bucket_length,
+        reverse=True)    
     if output_projection is None:
       dec_cell = rnn_cell.OutputProjectionWrapper(dec_cell, num_symbols)
     
@@ -712,9 +666,10 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
     if sample_mean and feed_previous and hidden_state is None:
       logging.info('Generating directly from mean')
       z = z_mean
-    if hidden_state is not None:
-      logging.info('Decoding from hidden state, generating random latent state')
-      z = tf.random_normal(tf.shape(z), 0, 1, dtype=tf.float32)
+    elif hidden_state is not None:
+      logging.info('Generating from loaded latent state')
+      #z = tf.random_normal(tf.shape(z), 0, 1, dtype=tf.float32)
+      z = hidden_state
 
     if concat_encoded:
       logging.info('Concatenating latent and hidden states')
@@ -740,7 +695,7 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
         feed_previous=feed_previous, feed_prev_p=feed_prev_p,
         bow_mask=bow_mask, bow_no_replace=bow_no_replace,
         grammar=grammar)
-      return outputs, encoder_out_state, kl_obj
+      return outputs, z, kl_obj
 
     # If feed_previous is a Tensor, we construct 2 graphs and use cond.
     def decoder(feed_previous_bool):
@@ -754,7 +709,7 @@ def embedding_rnn_vae_seq2seq(encoder_inputs, decoder_inputs, cell,
           update_embedding_for_previous=False, feed_prev_p=feed_prev_p,
           bow_mask=bow_mask, bow_no_replace=bow_no_replace,
           grammar=grammar)
-        return outputs + [encoder_out_state]
+        return outputs + [z]
 
     outputs_and_state = control_flow_ops.cond(feed_previous,
                                               lambda: decoder(True),
@@ -897,7 +852,8 @@ def attention_decoder(decoder_inputs,
                       embedding_size=None,
                       encoder="reverse",
                       init_const=False,
-                      bow_mask=None):
+                      bow_mask=None,
+                      grammar=None):
   """RNN decoder with attention for the sequence-to-sequence model.
 
   In this context "attention" means that, during decoding, the RNN can look up
@@ -998,7 +954,7 @@ def attention_decoder(decoder_inputs,
 
     def init_state():
       logging.info("Init decoder state for bow")
-      for i in xrange(num_heads):
+      for head in xrange(num_heads):
         # matrix of ones
         s = array_ops.ones(array_ops.pack([batch_size, attn_length]), dtype=dtype)
         s.set_shape([None, attn_length])
@@ -1055,13 +1011,13 @@ def attention_decoder(decoder_inputs,
           if ndims:
             assert ndims == 2
         query = array_ops.concat(1, query_list)
-      for i in xrange(num_heads):
-        with variable_scope.variable_scope("Attention_%d" % i):
+      for head in xrange(num_heads):
+        with variable_scope.variable_scope("Attention_%d" % head):
           y = linear(query, attention_vec_size, True)
           y = array_ops.reshape(y, [-1, 1, 1, attention_vec_size])
           # Attention mask is a softmax of v^T * tanh(...).
           s = math_ops.reduce_sum(
-              v[i] * math_ops.tanh(hidden_features[i] + y), [2, 3])
+              v[head] * math_ops.tanh(hidden_features[head] + y), [2, 3])
           # multiply with source mask, then do softmax
           if src_mask is not None:
             s = s * src_mask
@@ -1087,13 +1043,23 @@ def attention_decoder(decoder_inputs,
     if bow_mask is not None:
       logging.info("Use bow mask to locally normalize output layer wrt bow vocabulary")
 
-    for i, inp in enumerate(decoder_inputs):
-      if i > 0:
+    if grammar is not None:
+      logging.info('Constraining decoder to grammar')
+      stack = None
+      if loop_function is not None and grammar.use_trg_mask:
+        stack = [tf.concat(0, 
+                           (grammar.start,
+                            grammar.nop * tf.ones([grammar.stack_nops], dtype=tf.int32)))
+                 for _ in range(grammar.batch_size)]  
+        logging.info('Initialising sampling-only stack')
+    
+    for inp_idx, inp in enumerate(decoder_inputs):
+      if inp_idx > 0:
         variable_scope.get_variable_scope().reuse_variables()
       # If loop_function is set, we use it instead of decoder_inputs.
       if loop_function is not None and prev is not None:
         with variable_scope.variable_scope("loop_function", reuse=True):
-          inp = loop_function(prev, i)
+          inp = loop_function(prev, inp_idx)
       # Merge input and previous attentions into one vector of the right size.
       input_size = inp.get_shape().with_rank(2)[1]
       if input_size.value is None:
@@ -1103,7 +1069,7 @@ def attention_decoder(decoder_inputs,
       cell_output, state = cell(x, state) # run cell on combination of input and previous attn masks
 
       # Run the attention mechanism.
-      if i == 0 and initial_state_attention:
+      if inp_idx == 0 and initial_state_attention:
         with variable_scope.variable_scope(variable_scope.get_variable_scope(),
                                            reuse=True):
           attns = attention(state) # calculate new attention masks (attention-weighted src vector)
@@ -1122,7 +1088,7 @@ def attention_decoder(decoder_inputs,
 
         # Maxout: cell.output_size --> maxout_size
         maxout_size = cell.output_size // 2
-        segment_id_list = [ [i,i] for i in xrange(maxout_size) ] # make pairs of segment ids to be max-ed over
+        segment_id_list = [ [m,m] for m in xrange(maxout_size) ] # make pairs of segment ids to be max-ed over
         segment_id_list = list(chain(*segment_id_list)) # flatten list
         segment_ids = tf.constant(segment_id_list, dtype=tf.int32)
         maxout_output = tf.transpose(tf.segment_max(tf.transpose(merge_output_plus_b), segment_ids)) # transpose to get shape (cell.output_size, batch_size) and reverse
@@ -1144,6 +1110,10 @@ def attention_decoder(decoder_inputs,
         # To do this without changing the architecture, apply a mask over the output layer
         # that sets all logits for words outside the bag to zero.
         output = output * bow_mask
+
+      if grammar is not None:
+        output = apply_grammar(output, inp_idx, stack, loop_function, grammar,
+                               scope=variable_scope.get_variable_scope())
 
       if loop_function is not None:
         prev = output
@@ -1171,7 +1141,8 @@ def embedding_attention_decoder(decoder_inputs,
                                 maxout_layer=False,
                                 encoder="reverse",
                                 init_const=False,
-                                bow_mask=None):
+                                bow_mask=None,
+                                grammar=None):
   """RNN decoder with embedding and attention and a pure-decoding option.
 
   Args:
@@ -1246,7 +1217,8 @@ def embedding_attention_decoder(decoder_inputs,
         embedding_size=embedding_size,
         encoder=encoder,
         init_const=init_const,
-        bow_mask=bow_mask)
+        bow_mask=bow_mask,
+        grammar=grammar)
 
 def embedding_attention_seq2seq(encoder_inputs,
                                 decoder_inputs,
@@ -1271,7 +1243,8 @@ def embedding_attention_seq2seq(encoder_inputs,
                                 bow_mask=None,
                                 keep_prob=1.0,
                                 initializer=None,
-                                legacy=False):
+                                legacy=False,
+                                grammar=None):
   """Embedding sequence-to-sequence model with attention.
 
   This model first embeds encoder_inputs by a newly created embedding (of shape
@@ -1392,7 +1365,8 @@ def embedding_attention_seq2seq(encoder_inputs,
           maxout_layer=maxout_layer,
           encoder=encoder,
           init_const=init_const,
-          bow_mask=bow_mask)
+          bow_mask=bow_mask,
+          grammar=grammar)
 
     # If feed_previous is a Tensor, we construct 2 graphs and use cond.
     def decoder(feed_previous_bool):
@@ -1416,7 +1390,8 @@ def embedding_attention_seq2seq(encoder_inputs,
             maxout_layer=maxout_layer,
             encoder=encoder,
             init_const=init_const,
-            bow_mask=bow_mask)
+            bow_mask=bow_mask,
+            grammar=grammar)
         state_list = [state]
         if nest.is_sequence(state):
           state_list = nest.flatten(state)

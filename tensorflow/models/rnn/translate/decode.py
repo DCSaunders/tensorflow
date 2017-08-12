@@ -62,9 +62,10 @@ def decode(config, input=None, output=None, max_sentences=0):
         if len(token_ids) > max_input_length:
           max_input_length = len(token_ids)
     buckets = list(model_utils._buckets)
+    logging.info("Decoder buckets: {}".format(buckets))
     max_bucket = buckets[len(buckets) - 1][0]
     if max_input_length > max_bucket:
-      bucket = model_utils.make_bucket(max_input_length, greedy_decoder=True)
+      bucket = model_utils.make_bucket(max_input_length, greedy_decoder=True, max_trg_len=config['max_target_length'])
       buckets.append(bucket)
       logging.info("Add new bucket={}".format(bucket))
 
@@ -99,7 +100,10 @@ def unpickle_hidden(config, out, max_sentences=0):
     while True and (max_sentences == 0 or len(hidden_list) < max_sentences):
       try:
         hidden = np.array(unpickler.load()['states'])
-        hidden = hidden.reshape(1, 2*hidden_size) # batch_size, BiRNN size
+        if config['seq2seq_mode'] == 'autoencoder':
+          hidden = hidden.reshape(1, 2*hidden_size) # batch_size, BiRNN size
+        elif config['seq2seq_mode'] == 'vae':
+          hidden = hidden.reshape(1, config['latent_size'])
         hidden_list.append(hidden)
       except (EOFError):
         break
@@ -118,9 +122,8 @@ def decode_interpolate_hidden(config, out, max_sentences=0):
       resize_dim = config['hidden_size']
       if config['use_lstm']:
         resize_dim *= 2
-    else:
+    elif model.seq2seq_mode == 'vae':
       resize_dim = config['latent_size']
-
     with open(config['decode_interpolate_hidden'], 'rb') as f_in:
       label_samples = cPickle.load(f_in)
       for label in label_samples:

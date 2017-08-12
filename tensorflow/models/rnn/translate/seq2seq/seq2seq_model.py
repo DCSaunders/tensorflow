@@ -230,7 +230,8 @@ class Seq2SeqModel(object):
                           init_backward=init_backward,
                           scope=scope,
                           legacy=legacy,
-                          bow_mask=self.bow_mask)
+                          bow_mask=self.bow_mask,
+                          grammar=self.grammar)
       if self.seq2seq_mode in ('autoencoder', 'vae'):
         seq2seq_args.update(num_symbols=source_vocab_size,
                             feed_prev_p=feed_prev_p,
@@ -264,7 +265,11 @@ class Seq2SeqModel(object):
                     
     # Feeds for inputs.
     self.encoder_inputs = []
-    enc_state_size = 2 * hidden_size if use_lstm else hidden_size
+    if self.seq2seq_mode == 'vae':
+      enc_state_size = latent_size
+    else:
+      enc_state_size = 2 * hidden_size if use_lstm else hidden_size
+
     self.encoder_states = tf.placeholder(tf.float32, shape=[None, enc_state_size])
     self.decoder_inputs = []
     self.feed_prev_p = tf.placeholder(tf.float32, shape=[])
@@ -272,9 +277,9 @@ class Seq2SeqModel(object):
     self.targets = []
     if self.grammar:
       self.grammar.grammar_mask = []
-      self.grammar.rhs_mask = tf.placeholder(
-        tf.int32, shape=[None, None], name='grammar_rhs')
-      if forward_only:
+      if forward_only and grammar.use_trg_mask:
+        self.grammar.rhs_mask = tf.placeholder(
+          tf.int32, shape=[None, None], name='grammar_rhs')
         self.grammar.grammar_full_mask = tf.placeholder(
           tf.float32, shape=[None, None], name='grammar_mask')
     for i in xrange(buckets[-1][0]):  # Last bucket is the biggest one.
@@ -421,18 +426,21 @@ class Seq2SeqModel(object):
         
     # Input feed: encoder inputs, decoder inputs, target_weights, as provided.
     input_feed = {}
+    use_grammar_stack = (self.grammar is not None and self.grammar.use_trg_mask and forward_only)
+    if use_grammar_stack:
+        input_feed[self.grammar.rhs_mask.name] = self.grammar.sampling_rhs
+        input_feed[self.grammar.grammar_full_mask.name] = self.grammar.mask
+
     for l in xrange(encoder_size):
       input_feed[self.encoder_inputs[l].name] = encoder_inputs[l]
     for l in xrange(decoder_size):
       input_feed[self.decoder_inputs[l].name] = word_dropout(decoder_inputs[l])
       if self.scheduled_sample and not forward_only:
-        input_feed[self.feed_prev_p.name] = min(1.0, self.global_step.eval() / self.scheduled_sample_steps)
+        input_feed[self.feed_prev_p.name] = min(
+          1.0, 
+          self.global_step.eval() / self.scheduled_sample_steps)
       if self.grammar is not None:
-        input_feed[self.grammar.rhs_mask.name] = self.grammar.sampling_rhs
-        if not forward_only:
-          input_feed[self.grammar.grammar_mask[l].name] = trg_mask[l]
-        else:
-          input_feed[self.grammar.grammar_full_mask.name] = self.grammar.mask
+        input_feed[self.grammar.grammar_mask[l].name] = trg_mask[l]
 
       input_feed[self.target_weights[l].name] = target_weights[l]
       if l < decoder_size - 1:
@@ -585,14 +593,16 @@ class Seq2SeqModel(object):
     if batch_ptr is not None:
       train_idx = batch_ptr["offset"]
       idx_map = batch_ptr["idx_map"]
-    
+
     encoder_inputs, decoder_inputs = [], []
     encoder_size, decoder_size = self.buckets[-1] if self.single_graph else self.buckets[bucket_id]
+    grammar_mask = None
+    if self.grammar is not None:
+      grammar_mask = [np.zeros((self.batch_size, self.grammar.n_rules)) for _ in xrange(decoder_size)]
 
-    # Get a random batch of encoder and decoder inputs from data,
-    # pad them if needed, reverse encoder inputs and add GO to decoder.
+    # Get random batch of src and trg inputs, pad / reverse if needed, add GO to trg
     enc_input_lengths = []
-    for _ in xrange(self.batch_size):
+    for batch_idx in xrange(self.batch_size):
       if batch_ptr is not None:
         if bookk is not None:
           bookk[bucket_id][idx_map[train_idx]] = 1
@@ -601,19 +611,27 @@ class Seq2SeqModel(object):
       else:
         encoder_input, decoder_input = random.choice(data[bucket_id])
       enc_input_lengths.append(len(encoder_input))
-
       # Encoder inputs are padded and then reversed.
       encoder_pad = [data_utils.PAD_ID] * (encoder_size - len(encoder_input))
+      full_encoder_in = encoder_input + encoder_pad
+
       if encoder == "bidirectional" or encoder == "bow":
         # if we use a bidirectional encoder, inputs are reversed for backward state
-        encoder_inputs.append(list(encoder_input + encoder_pad))
+        encoder_inputs.append(list(full_encoder_in))
       elif encoder == "reverse":
-        encoder_inputs.append(list(reversed(encoder_input + encoder_pad)))
+        encoder_inputs.append(list(reversed(full_encoder_in)))
 
       # Decoder inputs get an extra "GO" symbol, and are padded then.
       decoder_pad_size = decoder_size - len(decoder_input) - 1
-      decoder_inputs.append([data_utils.GO_ID] + decoder_input +
-                            [data_utils.PAD_ID] * decoder_pad_size)       
+      full_decoder_in = [data_utils.GO_ID] + decoder_input + [data_utils.PAD_ID] * decoder_pad_size
+      decoder_inputs.append(full_decoder_in)       
+
+      if self.grammar is not None:
+        if self.grammar.use_trg_mask:
+          self.grammar.add_mask_seq(grammar_mask,
+                                    full_decoder_in[1:] + [data_utils.PAD_ID], batch_idx)
+        else:
+          self.grammar.add_mask_seq(grammar_mask, full_encoder_in, batch_idx)          
 
     # Now we create batch-major vectors from the data selected above.
     batch_encoder_inputs, batch_decoder_inputs, batch_weights_trg = [], [], []
@@ -648,15 +666,9 @@ class Seq2SeqModel(object):
       batch_encoder_inputs.append(
           np.array([encoder_inputs[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
-             
-    grammar_mask = None
-    if self.grammar:
-      grammar_mask = []
-      stack = [[] for _ in range(self.batch_size)]
 
     # Batch decoder inputs are re-indexed decoder_inputs, we create weights.
     for length_idx in xrange(decoder_size):
-      
       # Create target_weights to be 0 for targets that are padding.
       batch_weight = np.ones(self.batch_size, dtype=np.float32)
       for batch_idx in xrange(self.batch_size):
@@ -674,9 +686,6 @@ class Seq2SeqModel(object):
       batch_decoder_inputs.append(
           np.array([decoder_inputs[batch_idx][length_idx]
                     for batch_idx in xrange(self.batch_size)], dtype=np.int32))
-      if self.grammar is not None:
-        grammar_mask.append(
-          self.grammar.stack_step(stack, batch_decoder_inputs[-1]))
     # Make sequence length vector
     sequence_length = None
     if self.sequence_length is not None:

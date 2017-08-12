@@ -33,6 +33,7 @@ tf.app.flags.DEFINE_string("dev_src_idx", None, "Source side of development data
 tf.app.flags.DEFINE_string("dev_trg", None, "Target side of development data")
 tf.app.flags.DEFINE_string("dev_trg_idx", None, "Target side of development data (integer-mapped)")
 tf.app.flags.DEFINE_integer("max_sequence_length", 50, "Maximum length of source/target training sentences")
+tf.app.flags.DEFINE_integer("max_target_length", 0, "Maximum length of target training sentences: if 0, default to same as max_sequence_length")
 tf.app.flags.DEFINE_integer("max_train_data_size", 0, "Limit on the size of training data (0: no limit).")
 tf.app.flags.DEFINE_integer("max_train_batches", 0, "Limit on the number of training batches.")
 tf.app.flags.DEFINE_integer("max_train_epochs", 0, "Limit on the number of training epochs.")
@@ -75,7 +76,7 @@ tf.app.flags.DEFINE_boolean("use_seqlen", True, "Use sequence length for encoder
 tf.app.flags.DEFINE_boolean("use_src_mask", True, "Use source mask over for decoder attentions.")
 tf.app.flags.DEFINE_boolean("maxout_layer", False, "If > 0, use a maxout layer of given size and full softmax instead of sampled softmax")
 tf.app.flags.DEFINE_string("encoder", "reverse", "Select encoder from 'reverse', 'bidirectional', 'bow'. The 'reverse' encoder is unidirectional and reverses the input "
-                            "(default for tensorflow), the bidirectional encoder creates both forward and backward states and "
+          "(default for tensorflow), the bidirectional encoder creates both forward and backward states and "
                             "concatenates them (like the Bahdanau model)")
 tf.app.flags.DEFINE_boolean("init_backward", False, "When using the bidirectional encoder, initialise the hidden decoder state from the backward encoder state (default: forward).")                            
 tf.app.flags.DEFINE_boolean("legacy", False, "Read legacy models with slightly different variable scopes")
@@ -97,7 +98,7 @@ tf.app.flags.DEFINE_integer("kl_annealing_steps", 1000, "Steps over which to lin
 tf.app.flags.DEFINE_float("word_keep_prob", 1.0, "Probability of not replacing decoder input word with UNK during training")
 tf.app.flags.DEFINE_float("kl_min", 0.0, "If >0, use minimum information criterion on KL loss as in https://arxiv.org/abs/1606.04934")
 tf.app.flags.DEFINE_string("grammar_def", None, "File defining int-mapped grammar")
-
+tf.app.flags.DEFINE_boolean("use_trg_grammar_mask", True, "use per-step grammar mask determined by prev output on the target, not source rule sequence")
 
 # Optimization settings
 tf.app.flags.DEFINE_string("opt_algorithm", "sgd", "Optimization algorithm: sgd, adagrad, adadelta")

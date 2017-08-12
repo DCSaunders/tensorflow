@@ -322,69 +322,75 @@ def get_training_data(config):
     return src_train, trg_train, src_dev, trg_dev
 
 class Grammar(object):
-  def __init__(self, mask_dict, rules, max_nt):
-    '''n_rules: number of rules (equivalent to vocab size)                        
-      n_nt: number of unique non-terminals                                        
-      mask: binary numpy array. mask(i,j) = 1 if non-terminal i on LHS of rule j  
+  def __init__(self, mask_dict, rules, use_trg_mask=False, max_nt=0):
+    '''n_rules: number of rules (equivalent to vocab size)                      
+      n_nt: number of unique non-terminals                                      
+      mask: binary numpy array. mask(i,j) = 1 if non-terminal i on LHS of rule j
       start: start rule RHS                               
-      rhs: padded numpy array containing indices of NTs on RHS of each rule       
+      rhs: padded numpy array containing indices of NTs on RHS of each rule     
     '''
+    self.use_trg_mask = use_trg_mask
     self.n_rules = len(rules)
     self.n_nt = max_nt + 1
+    self.rule_id_to_lhs = dict()
     self.start = [int(r) for r in rules[GO_ID]] 
     self.nop = EOS_ID
     self.stack_nops = 1
     self.batch_size = 1
     self.grammar_mask = None
     self.rhs_mask = None
+    self.grammar_full_mask = None
     self.mask = np.zeros((self.n_nt, self.n_rules), dtype=np.float32)
     self.batch_size = 1 # reset by model                                        
     self.rhs = []
     self.sampling_rhs = []
-    for nt, rule in mask_dict.items():
-      self.mask[nt, rule] = 1
-    self.mask[UNK_ID:, UNK_ID] = self.mask[UNK_ID, UNK_ID:] = 1 
-    self.mask[:, GO_ID] = 0 # nothing should map to GO
+    for nt, rule_id_list in mask_dict.items():
+      self.mask[nt, rule_id_list] = 1
+      for rule_id in rule_id_list:
+        self.rule_id_to_lhs[rule_id] = nt
+
+    internal_rules = np.zeros(self.n_rules)
+    internal_nts = np.zeros(self.n_nt)
     max_nt_count = 0
     for rule_idx, rule in enumerate(rules):
       self.rhs.append([int(r) for r in reversed(rule) if int(r) in mask_dict])
       max_nt_count = max(max_nt_count, len(rule))
       self.sampling_rhs.append([int(r) for r in rule if int(r) in mask_dict])
+      if self.rhs[rule_idx]:
+        internal_rules[rule_idx] = 1
+        internal_nts[self.rule_id_to_lhs[rule_idx]] = 1
     for rhs in self.sampling_rhs:
       pad_len = max_nt_count - len(rhs)
       rhs.extend(pad_len * [PAD_ID])    
+    self.mask[UNK_ID] = internal_rules
+    self.mask[:, UNK_ID] = internal_nts 
+    self.mask[:, GO_ID] = 0 # nothing should map to GO
+    self.mask[:, PAD_ID] = 0 # nothing should map to PAD
 
-
-  def pop_or_nothing(self, seq):
-    if len(seq) >= 1:
-      return seq.pop()
-    else:
-      return self.nop
-
-  def stack_step(self, stack, true_inputs):
-    # Given a stack of non-terminals for each sequence in a batch:
-    # - return the rule mask corresponding to the rightmost non-terminals
-    # - update the stack with the RHS of the correct rule
+  def add_mask_seq(self, grammar_mask, true_inputs, batch_idx):
     for idx, inp in enumerate(true_inputs):
-      stack[idx].extend(self.rhs[inp])
-    index = [self.pop_or_nothing(seq) for seq in stack]
-    return self.mask[index]
+      if inp in set((PAD_ID, GO_ID, EOS_ID, UNK_ID)):
+        lhs = inp
+      else:
+        lhs = self.rule_id_to_lhs[inp]
+      grammar_mask[idx][batch_idx] = self.mask[lhs]
 
-def prepare_grammar(grammar_path):
+
+def prepare_grammar(grammar_path, use_trg_mask):
   grammar = None
   if grammar_path is not None and gfile.Exists(grammar_path):
     logging.info('Getting grammar from path {}'.format(grammar_path))
     grammar_eos()
     mask_dict = collections.defaultdict(list)
     rules = []
-    with open(grammar_path, 'r') as f:
+    with open(grammar_path) as f:
       for idx, line in enumerate(f):
         nt, rule = line.split(':')
         nt = int(nt.strip())
         # NB: this relies on non-terminals having the first indices
         mask_dict[nt].append(idx)
         rules.append(rule.strip().split())      
-      grammar = Grammar(mask_dict, rules, max_nt=nt)
+      grammar = Grammar(mask_dict, rules, use_trg_mask, max_nt=nt)
   elif grammar_path is not None:
     raise ValueError("Grammar path not found: {}".format(grammar_path))
   return grammar
