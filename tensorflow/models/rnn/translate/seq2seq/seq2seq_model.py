@@ -629,7 +629,8 @@ class Seq2SeqModel(object):
       if self.grammar is not None:
         if self.grammar.use_trg_mask:
           self.grammar.add_mask_seq(grammar_mask,
-                                    full_decoder_in[1:] + [data_utils.PAD_ID], batch_idx)
+                                    full_decoder_in,
+                                    batch_idx)
         else:
           self.grammar.add_mask_seq(grammar_mask, full_encoder_in, batch_idx)          
 

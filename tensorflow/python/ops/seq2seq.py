@@ -146,10 +146,10 @@ def rnn_grammar_decoder(decoder_inputs, initial_state, cell, grammar, loop_funct
         prev = output
   return outputs, state
 
-def apply_grammar(output, output_idx, stack, loop_function, grammar, scope=None):
+def apply_grammar(output, output_idx, stack, grammar, scope=None):
   reuse = (output_idx > 0)
   with variable_scope.variable_scope(scope or "grammar", reuse=reuse):
-    if loop_function is not None and grammar.use_trg_mask:
+    if stack is not None:
       current_nt = [tf.slice(stack[seq_id], [0], [1]) 
                     for seq_id in range(grammar.batch_size)]
       new_mask = tf.gather_nd(grammar.grammar_full_mask, current_nt)
@@ -157,7 +157,7 @@ def apply_grammar(output, output_idx, stack, loop_function, grammar, scope=None)
       new_mask = grammar.grammar_mask[output_idx]
     output = output * new_mask
 
-    if loop_function is not None and grammar.use_trg_mask:
+    if stack is not None:
       batch_choose = tf.expand_dims(tf.argmax(output, 1), 1)
       new_rhs = tf.unstack(tf.gather_nd(grammar.rhs_mask, batch_choose),
                            grammar.batch_size)
@@ -1112,7 +1112,7 @@ def attention_decoder(decoder_inputs,
         output = output * bow_mask
 
       if grammar is not None:
-        output = apply_grammar(output, inp_idx, stack, loop_function, grammar,
+        output = apply_grammar(output, inp_idx, stack, grammar,
                                scope=variable_scope.get_variable_scope())
 
       if loop_function is not None:

@@ -369,11 +369,12 @@ class Grammar(object):
 
   def add_mask_seq(self, grammar_mask, true_inputs, batch_idx):
     for idx, inp in enumerate(true_inputs):
-      if inp in set((PAD_ID, GO_ID, EOS_ID, UNK_ID)):
-        lhs = inp
-      else:
+      #if inp == GO_ID:
+      #  lhs = self.rhs[inp][-1]
+      #else:
+      if idx > 0:
         lhs = self.rule_id_to_lhs[inp]
-      grammar_mask[idx][batch_idx] = self.mask[lhs]
+        grammar_mask[idx - 1][batch_idx] = self.mask[lhs]
 
 
 def prepare_grammar(grammar_path, use_trg_mask):
